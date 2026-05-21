@@ -30,6 +30,9 @@
     "markdownlint": "markdownlint \"**/*.md\" --ignore node_modules",
     "test": "vitest run"
   },
+  "dependencies": {
+    "dotenv": "^16.6.1"
+  },
   "devDependencies": {
     "@mariozechner/pi-ai": "^0.57.1",
     "@mariozechner/pi-coding-agent": "^0.57.1",
