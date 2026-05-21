@@ -2,6 +2,7 @@ node_modules
 .DS_Store
 .pnpm-store
 npm-debug.log
+bun.lock
 
 # Coverage
 coverage/

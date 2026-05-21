@@ -7,11 +7,19 @@ import {
   setTaskListExpanded,
 } from "../.pi/extensions/workflow-orchestrator/render.js";
 
+// Portable frozen clock: works with both vitest and bun test runners.
+const FROZEN_NOW = new Date("2026-03-15T12:00:00.000Z").getTime();
+let originalDateNow: () => number;
+
 describe("render.ts", () => {
   let mockCtx: ExtensionContext;
   let mockUi: any;
 
   beforeEach(() => {
+    // Freeze Date.now() without relying on vitest fake timers
+    originalDateNow = Date.now;
+    Date.now = () => FROZEN_NOW;
+
     mockUi = {
       setStatus: vi.fn(),
       setWidget: vi.fn(),
@@ -30,15 +38,13 @@ describe("render.ts", () => {
         appendEntry: vi.fn(),
       },
     } as unknown as ExtensionContext;
-
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-03-15T12:00:00.000Z"));
   });
 
   afterEach(() => {
-    vi.useRealTimers();
+    Date.now = originalDateNow;
     vi.clearAllMocks();
   });
+
 
   function createBaseState(overrides?: Partial<WorkflowState>): WorkflowState {
     return {
