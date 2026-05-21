@@ -1,4 +1,9 @@
 import { describe, expect, it } from "vitest";
+import {
+  getAgentRetryDelayMs,
+  isRetryableAgentError,
+  normalizeAgentRetryOptions,
+} from "../.pi/extensions/workflow-orchestrator/runner.js";
 
 /**
  * Tests for tool call capture logic in RpcAgent.
@@ -185,5 +190,68 @@ describe("Tool call capture from RPC events", () => {
     expect(run.toolCalls).toHaveLength(1);
     expect(run.toolCalls[0].name).toBe("grep");
     expect(run.lastAssistantText).toBe("Found it!");
+  });
+});
+
+describe("agent retry helpers", () => {
+  it("detects OpenRouter-style rate limit errors as retryable", () => {
+    expect(isRetryableAgentError(new Error("OpenRouter API error 429: rate limit exceeded"))).toBe(
+      true,
+    );
+    expect(isRetryableAgentError("Too many requests. Retry-After: 12")).toBe(true);
+  });
+
+  it("detects transient transport errors as retryable", () => {
+    expect(isRetryableAgentError(new Error("ECONNRESET while reading response"))).toBe(true);
+    expect(isRetryableAgentError(new Error("provider returned 503 service unavailable"))).toBe(
+      true,
+    );
+  });
+
+  it("does not retry ordinary agent failures", () => {
+    expect(isRetryableAgentError(new Error("Verifier found missing tests"))).toBe(false);
+    expect(isRetryableAgentError(new Error("Agent already running"))).toBe(false);
+  });
+
+  it("normalizes invalid retry options to safe bounds", () => {
+    const retry = normalizeAgentRetryOptions({
+      maxAttempts: 0,
+      initialDelayMs: -1,
+      maxDelayMs: -1,
+      backoffMultiplier: 0,
+      jitterMs: -1,
+    });
+
+    expect(retry).toEqual({
+      maxAttempts: 1,
+      initialDelayMs: 0,
+      maxDelayMs: 0,
+      backoffMultiplier: 1,
+      jitterMs: 0,
+    });
+  });
+
+  it("uses exponential backoff with cap and jitter", () => {
+    const retry = normalizeAgentRetryOptions({
+      initialDelayMs: 1000,
+      maxDelayMs: 2500,
+      backoffMultiplier: 2,
+      jitterMs: 100,
+    });
+
+    expect(getAgentRetryDelayMs(1, retry, undefined, () => 0.5)).toBe(1050);
+    expect(getAgentRetryDelayMs(2, retry, undefined, () => 0.5)).toBe(2050);
+    expect(getAgentRetryDelayMs(3, retry, undefined, () => 0.5)).toBe(2550);
+  });
+
+  it("honors retry-after hints from provider errors", () => {
+    const retry = normalizeAgentRetryOptions({
+      initialDelayMs: 1000,
+      maxDelayMs: 2000,
+      jitterMs: 1000,
+    });
+
+    expect(getAgentRetryDelayMs(1, retry, new Error("429 retry-after: 7"), () => 0.5)).toBe(7000);
+    expect(getAgentRetryDelayMs(1, retry, new Error("try again in 250ms"), () => 0.5)).toBe(250);
   });
 });

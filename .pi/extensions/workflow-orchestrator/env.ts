@@ -2,6 +2,8 @@ import { config as loadDotenv } from "dotenv";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+type ProcessEnv = Record<string, string | undefined>;
+
 /** Walk upward from cwd to find the pi project root (has .pi/agents or pi package.json). */
 export function findProjectRoot(startDir: string): string | null {
   let current = path.resolve(startDir);
@@ -41,7 +43,7 @@ export function loadProjectEnv(cwd: string): void {
 }
 
 /** Environment for spawned `pi` subagents: parent env plus project `.env`. */
-export function getSubagentEnv(cwd: string): NodeJS.ProcessEnv {
+export function getSubagentEnv(cwd: string): ProcessEnv {
   loadProjectEnv(cwd);
   return { ...process.env };
 }

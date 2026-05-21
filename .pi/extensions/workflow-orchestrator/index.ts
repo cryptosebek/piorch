@@ -367,6 +367,7 @@ function getTaskRunner(
     model: agent.model,
     tools: agent.tools,
     allowedExtensions: resolveAllowedExtensions(agentName, config, currentState),
+    retry: config.agentRetry,
   });
 
   const taskRunner: TaskRunner = { key, agent: runner, stageId: stage.id };
@@ -742,6 +743,7 @@ function getPmRunner(
     model: pmAgent.model,
     tools: pmAgent.tools,
     allowedExtensions: resolveAllowedExtensions(pmAgent.name, config, currentState),
+    retry: config.agentRetry,
   });
   return pmRunner;
 }

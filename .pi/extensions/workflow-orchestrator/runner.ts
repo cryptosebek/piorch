@@ -43,11 +43,20 @@ export interface RpcAgentOptions {
   model?: string;
   tools?: string[];
   allowedExtensions?: string[];
+  retry?: Partial<AgentRetryOptions>;
 }
 
 export interface RpcRunOptions {
   onUpdate?: (update: AgentRunUpdate) => void;
   signal?: AbortSignal;
+}
+
+export interface AgentRetryOptions {
+  maxAttempts: number;
+  initialDelayMs: number;
+  maxDelayMs: number;
+  backoffMultiplier: number;
+  jitterMs: number;
 }
 
 interface RpcRunState {
@@ -57,6 +66,116 @@ interface RpcRunState {
   toolCalls: ToolCallCapture[];
   onUpdate?: (update: AgentRunUpdate) => void;
   aborted?: boolean;
+}
+
+export const DEFAULT_AGENT_RETRY_OPTIONS: AgentRetryOptions = {
+  maxAttempts: 5,
+  initialDelayMs: 5000,
+  maxDelayMs: 120000,
+  backoffMultiplier: 2,
+  jitterMs: 1000,
+};
+
+const RETRYABLE_ERROR_PATTERNS = [
+  /(?:^|\D)429(?:\D|$)/i,
+  /rate.?limit/i,
+  /too many requests/i,
+  /retry.?after/i,
+  /temporarily unavailable/i,
+  /service unavailable/i,
+  /overloaded/i,
+  /timeout/i,
+  /timed out/i,
+  /econnreset/i,
+  /etimedout/i,
+  /(?:^|\D)502(?:\D|$)/i,
+  /(?:^|\D)503(?:\D|$)/i,
+  /(?:^|\D)504(?:\D|$)/i,
+];
+
+export function normalizeAgentRetryOptions(retry?: Partial<AgentRetryOptions>): AgentRetryOptions {
+  const merged = { ...DEFAULT_AGENT_RETRY_OPTIONS, ...retry };
+  return {
+    maxAttempts: Math.max(1, Math.floor(merged.maxAttempts)),
+    initialDelayMs: Math.max(0, merged.initialDelayMs),
+    maxDelayMs: Math.max(0, merged.maxDelayMs),
+    backoffMultiplier: Math.max(1, merged.backoffMultiplier),
+    jitterMs: Math.max(0, merged.jitterMs),
+  };
+}
+
+function errorText(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export function isRetryableAgentError(error: unknown): boolean {
+  const text = errorText(error);
+  if (!text) return false;
+  return RETRYABLE_ERROR_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function parseRetryAfterMs(error: unknown): number | undefined {
+  const text = errorText(error);
+  const retryAfterMatch =
+    text.match(/retry-after["':\s]+(\d+(?:\.\d+)?)/i) ??
+    text.match(/retry_after["':\s]+(\d+(?:\.\d+)?)/i) ??
+    text.match(/try again in\s+(\d+(?:\.\d+)?)\s*(ms|s|sec|seconds|m|min|minutes)?/i);
+
+  if (!retryAfterMatch) return undefined;
+
+  const value = Number(retryAfterMatch[1]);
+  if (!Number.isFinite(value) || value < 0) return undefined;
+
+  const unit = retryAfterMatch[2]?.toLowerCase();
+  if (unit === "ms") return value;
+  if (unit === "m" || unit === "min" || unit === "minutes") return value * 60_000;
+  return value * 1000;
+}
+
+export function getAgentRetryDelayMs(
+  failedAttempt: number,
+  retry: AgentRetryOptions,
+  error?: unknown,
+  random: () => number = Math.random,
+): number {
+  const retryAfterMs = parseRetryAfterMs(error);
+  if (retryAfterMs !== undefined) return retryAfterMs;
+
+  const exponent = Math.max(0, failedAttempt - 1);
+  const exponentialDelay = retry.initialDelayMs * retry.backoffMultiplier ** exponent;
+  const cappedDelay = Math.min(exponentialDelay, retry.maxDelayMs);
+  const jitter = retry.jitterMs > 0 ? Math.floor(random() * retry.jitterMs) : 0;
+  return cappedDelay + jitter;
+}
+
+function waitForRetry(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  if (signal?.aborted) return Promise.reject(new Error("Aborted"));
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+
+    const onAbort = () => {
+      cleanup();
+      reject(new Error("Aborted"));
+    };
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", onAbort);
+    };
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function writePromptToTempFile(
@@ -226,11 +345,13 @@ export class RpcAgent {
   private currentRun: RpcRunState | null = null;
   private lastToolCalls: ToolCallCapture[] = [];
   private options: RpcAgentOptions;
+  private retry: AgentRetryOptions;
   private tmpPromptDir: string | null = null;
   private tmpPromptPath: string | null = null;
 
   constructor(options: RpcAgentOptions) {
     this.options = options;
+    this.retry = normalizeAgentRetryOptions(options.retry);
   }
 
   getLastToolCalls(): ToolCallCapture[] {
@@ -284,13 +405,46 @@ export class RpcAgent {
   }
 
   async runPrompt(message: string, options?: RpcRunOptions): Promise<string> {
+    let failedAttempts = 0;
+
+    while (true) {
+      try {
+        return await this.runPromptOnce(message, options);
+      } catch (error) {
+        failedAttempts += 1;
+        if (
+          options?.signal?.aborted ||
+          failedAttempts >= this.retry.maxAttempts ||
+          !isRetryableAgentError(error)
+        ) {
+          throw error;
+        }
+
+        this.dispose();
+        const delayMs = getAgentRetryDelayMs(failedAttempts, this.retry, error);
+        await waitForRetry(delayMs, options?.signal);
+      }
+    }
+  }
+
+  private async runPromptOnce(message: string, options?: RpcRunOptions): Promise<string> {
     this.start();
     if (this.currentRun) throw new Error("Agent already running");
 
     return new Promise<string>((resolve, reject) => {
+      let cleanup = () => {};
+      const finishResolve = (value: string) => {
+        cleanup();
+        resolve(value);
+      };
+      const finishReject = (error: Error) => {
+        cleanup();
+        reject(error);
+      };
+
       this.currentRun = {
-        resolve,
-        reject,
+        resolve: finishResolve,
+        reject: finishReject,
         lastAssistantText: "",
         toolCalls: [],
         onUpdate: options?.onUpdate,
@@ -303,10 +457,14 @@ export class RpcAgent {
           run.aborted = true;
           this.currentRun = null;
           this.abort();
-          reject(new Error("Aborted"));
+          finishReject(new Error("Aborted"));
         };
-        if (options.signal.aborted) onAbort();
-        else options.signal.addEventListener("abort", onAbort, { once: true });
+        cleanup = () => options.signal?.removeEventListener("abort", onAbort);
+        if (options.signal.aborted) {
+          onAbort();
+          return;
+        }
+        options.signal.addEventListener("abort", onAbort, { once: true });
       }
 
       this.send({ type: "prompt", message });

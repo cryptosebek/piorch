@@ -37,9 +37,36 @@ describe("loadWorkflowConfig", () => {
     const loaded = loadWorkflowConfig(cwd, name);
     expect(loaded.config.name).toBe("temp");
     expect(loaded.config.parallelism).toBe(1);
+    expect(loaded.config.agentRetry).toEqual({
+      maxAttempts: 5,
+      initialDelayMs: 5000,
+      maxDelayMs: 120000,
+      backoffMultiplier: 2,
+      jitterMs: 1000,
+    });
     expect(loaded.config.taskFlow.memory?.keepDeveloperMemory).toBe(true);
     expect(loaded.config.taskFlow.memory?.keepVerifierMemoryOnDeveloperFailure).toBe(true);
     expect(loaded.config.taskFlow.memory?.verifierSelfFailureMemory).toBe("keep");
+  });
+
+  it("loads custom agent retry policy", () => {
+    const config = {
+      name: "temp",
+      goal: "test",
+      agentRetry: {
+        maxAttempts: 2,
+        initialDelayMs: 10,
+        maxDelayMs: 100,
+        backoffMultiplier: 3,
+        jitterMs: 0,
+      },
+      agents: { pm: "pm", developer: "dev", verifier: "ver" },
+      waveSource: { type: "static", staticWaves: [{ goal: "g", tasks: [] }] },
+      taskFlow: { stages: [{ id: "develop", agent: "dev", inputTemplate: "x", outputSchema: {} }] },
+    };
+    const { cwd, name } = setupTempConfig(JSON.stringify(config));
+    const loaded = loadWorkflowConfig(cwd, name);
+    expect(loaded.config.agentRetry).toEqual(config.agentRetry);
   });
 
   it("loads custom task memory policy", () => {

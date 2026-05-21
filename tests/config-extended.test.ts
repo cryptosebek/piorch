@@ -540,4 +540,47 @@ describe("config.ts - additional coverage", () => {
       expect(() => loadWorkflowConfig(tempDir, "nonexistent")).toThrow("Workflow not found");
     });
   });
+
+  describe("agent retry validation", () => {
+    function baseConfig(agentRetry: Record<string, number>) {
+      return {
+        name: "test",
+        goal: "test",
+        agentRetry,
+        agents: { pm: "pm", developer: "dev", verifier: "ver" },
+        waveSource: { type: "static", staticWaves: [] },
+        taskFlow: { stages: [{ id: "s1", agent: "dev", inputTemplate: "t", outputSchema: {} }] },
+      };
+    }
+
+    it("rejects maxAttempts less than 1", () => {
+      createWorkflowConfig("test", JSON.stringify(baseConfig({ maxAttempts: 0 })));
+      expect(() => loadWorkflowConfig(tempDir, "test")).toThrow(
+        "agentRetry.maxAttempts must be at least 1",
+      );
+    });
+
+    it("rejects negative delays and jitter", () => {
+      createWorkflowConfig(
+        "test",
+        JSON.stringify(
+          baseConfig({
+            initialDelayMs: -1,
+            maxDelayMs: -1,
+            jitterMs: -1,
+          }),
+        ),
+      );
+      expect(() => loadWorkflowConfig(tempDir, "test")).toThrow(
+        "agentRetry.initialDelayMs must be at least 0",
+      );
+    });
+
+    it("rejects backoffMultiplier less than 1", () => {
+      createWorkflowConfig("test", JSON.stringify(baseConfig({ backoffMultiplier: 0 })));
+      expect(() => loadWorkflowConfig(tempDir, "test")).toThrow(
+        "agentRetry.backoffMultiplier must be at least 1",
+      );
+    });
+  });
 });

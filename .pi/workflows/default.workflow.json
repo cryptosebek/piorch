@@ -5,6 +5,13 @@
   "maxTaskRetries": 6,
   "maxPmRetries": 3,
   "parallelism": 4,
+  "agentRetry": {
+    "maxAttempts": 5,
+    "initialDelayMs": 5000,
+    "maxDelayMs": 120000,
+    "backoffMultiplier": 2,
+    "jitterMs": 1000
+  },
   "allowedExtensionsByAgent": {
     "pm": ["./.pi/extensions/workflow-pm-tools/index.ts"],
     "developer": ["./.pi/extensions/workflow-task-tools/index.ts"],

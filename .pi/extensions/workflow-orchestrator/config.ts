@@ -53,6 +53,14 @@ const AllowedExtensionsByAgentSchema = Type.Record(Type.String(), Type.Array(Typ
 
 const AgentsSchema = Type.Record(Type.String(), Type.String());
 
+const AgentRetrySchema = Type.Object({
+  maxAttempts: Type.Optional(Type.Number()),
+  initialDelayMs: Type.Optional(Type.Number()),
+  maxDelayMs: Type.Optional(Type.Number()),
+  backoffMultiplier: Type.Optional(Type.Number()),
+  jitterMs: Type.Optional(Type.Number()),
+});
+
 const WorkflowSchema = Type.Object({
   name: Type.String(),
   goal: Type.String(),
@@ -60,6 +68,7 @@ const WorkflowSchema = Type.Object({
   maxTaskRetries: Type.Optional(Type.Number()),
   maxPmRetries: Type.Optional(Type.Number()),
   parallelism: Type.Optional(Type.Number()),
+  agentRetry: Type.Optional(AgentRetrySchema),
   allowedExtensions: Type.Optional(Type.Array(Type.String())),
   allowedExtensionsByAgent: Type.Optional(AllowedExtensionsByAgentSchema),
   agents: AgentsSchema,
@@ -127,6 +136,12 @@ export function loadWorkflowConfig(cwd: string, name: string): LoadedWorkflow {
   config.maxWaves = config.maxWaves ?? 10;
   config.maxTaskRetries = config.maxTaskRetries ?? 2;
   config.parallelism = config.parallelism ?? 1;
+  config.agentRetry = config.agentRetry ?? {};
+  config.agentRetry.maxAttempts = config.agentRetry.maxAttempts ?? 5;
+  config.agentRetry.initialDelayMs = config.agentRetry.initialDelayMs ?? 5000;
+  config.agentRetry.maxDelayMs = config.agentRetry.maxDelayMs ?? 120000;
+  config.agentRetry.backoffMultiplier = config.agentRetry.backoffMultiplier ?? 2;
+  config.agentRetry.jitterMs = config.agentRetry.jitterMs ?? 1000;
   config.taskFlow.memory = config.taskFlow.memory ?? {};
   config.taskFlow.memory.keepDeveloperMemory = config.taskFlow.memory.keepDeveloperMemory ?? true;
   config.taskFlow.memory.keepVerifierMemoryOnDeveloperFailure =
@@ -136,6 +151,21 @@ export function loadWorkflowConfig(cwd: string, name: string): LoadedWorkflow {
 
   if (config.parallelism < 1) {
     throw new Error("parallelism must be at least 1");
+  }
+  if (config.agentRetry.maxAttempts < 1) {
+    throw new Error("agentRetry.maxAttempts must be at least 1");
+  }
+  if (config.agentRetry.initialDelayMs < 0) {
+    throw new Error("agentRetry.initialDelayMs must be at least 0");
+  }
+  if (config.agentRetry.maxDelayMs < 0) {
+    throw new Error("agentRetry.maxDelayMs must be at least 0");
+  }
+  if (config.agentRetry.backoffMultiplier < 1) {
+    throw new Error("agentRetry.backoffMultiplier must be at least 1");
+  }
+  if (config.agentRetry.jitterMs < 0) {
+    throw new Error("agentRetry.jitterMs must be at least 0");
   }
 
   return { config, path: workflowPath };
