@@ -39,13 +39,9 @@ function baseOptions(task: TestTask) {
       const issues = result?.output?.issues ?? (error ? [error] : []);
       t.verifyOutput = { status: "fail", issues };
       t.issues = issues;
-      t.retries += 1;
-      return t.retries <= 2;
     },
     applyGenericFailure: (t: TestTask, error: string) => {
       t.issues = [error];
-      t.retries += 1;
-      return t.retries <= 2;
     },
     markVerified: (t: TestTask, stageId: string) => {
       t.status = "verified";
@@ -102,6 +98,35 @@ describe("runTaskFlow", () => {
         return { output: { status: "fail", issues: ["still broken"] }, outputText: "verify" };
       },
     });
+    expect(task.status).toBe("failed");
+  });
+
+  it("enforces maxRetries even if retry callbacks allow more", async () => {
+    const task: TestTask = { id: "T1", status: "pending", retries: 0 };
+    let developCount = 0;
+    let verifyCount = 0;
+
+    await runTaskFlow({
+      ...baseOptions(task),
+      maxRetries: 1,
+      applyVerifyFailure: (t: TestTask, _stageId: string, result: any, error?: string) => {
+        const issues = result?.output?.issues ?? (error ? [error] : []);
+        t.verifyOutput = { status: "fail", issues };
+        t.issues = issues;
+      },
+      runStage: async (stage) => {
+        if (stage.id === "develop") {
+          developCount += 1;
+          return { output: { status: "done" }, outputText: "dev" };
+        }
+        verifyCount += 1;
+        return { output: { status: "fail", issues: ["still broken"] }, outputText: "verify" };
+      },
+    });
+
+    expect(developCount).toBe(2);
+    expect(verifyCount).toBe(2);
+    expect(task.retries).toBe(2);
     expect(task.status).toBe("failed");
   });
 
@@ -163,9 +188,10 @@ describe("runTaskFlow", () => {
 
     await runTaskFlow({
       ...baseOptions(task),
+      maxRetries: 3,
       applyVerifyFailure: (t, stageId, result, error, reason) => {
         reasons.push(String(reason));
-        return baseOptions(t).applyVerifyFailure(t, stageId, result, error);
+        baseOptions(t).applyVerifyFailure(t, stageId, result, error);
       },
       runStage: async (stage) => {
         if (stage.id === "develop") return { output: { status: "done" }, outputText: "dev" };
