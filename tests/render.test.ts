@@ -45,7 +45,6 @@ describe("render.ts", () => {
     vi.clearAllMocks();
   });
 
-
   function createBaseState(overrides?: Partial<WorkflowState>): WorkflowState {
     return {
       runId: "test-run",

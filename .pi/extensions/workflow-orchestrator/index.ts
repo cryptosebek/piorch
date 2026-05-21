@@ -207,10 +207,7 @@ function buildPmChatPrompt(state: WorkflowState, message: string): string {
   ].join("\n\n");
 }
 
-export async function waitForClarification(
-  signal: AbortSignal,
-  token: string,
-): Promise<void> {
+export async function waitForClarification(signal: AbortSignal, token: string): Promise<void> {
   if (signal.aborted) return;
 
   await new Promise<void>((resolve) => {

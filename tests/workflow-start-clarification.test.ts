@@ -126,9 +126,8 @@ vi.mock("../.pi/extensions/workflow-orchestrator/runner.js", () => {
   return { RpcAgent: FakeRpcAgent };
 });
 
-const { default: registerWorkflowExtension } = await import(
-  "../.pi/extensions/workflow-orchestrator/index.js"
-);
+const { default: registerWorkflowExtension } =
+  await import("../.pi/extensions/workflow-orchestrator/index.js");
 
 function createMockContext(branch: any[] = []): ExtensionCommandContext {
   return {
@@ -158,9 +157,11 @@ function createMockPi(branch: any[] = []): ExtensionAPI & RegisteredHandlers {
         data: cloneJson(state),
       });
     }),
-    registerCommand: vi.fn((name: string, config: { handler: RegisteredHandlers["commands"][string] }) => {
-      handlers.commands[name] = config.handler;
-    }),
+    registerCommand: vi.fn(
+      (name: string, config: { handler: RegisteredHandlers["commands"][string] }) => {
+        handlers.commands[name] = config.handler;
+      },
+    ),
     registerTool: vi.fn(),
     registerMessageRenderer: vi.fn(),
     on: vi.fn((event: string, handler: RegisteredHandlers["events"][string]) => {
@@ -205,7 +206,7 @@ describe("workflow clarification regression", () => {
     expect(workflowCommand).toBeTypeOf("function");
     expect(inputHandler).toBeTypeOf("function");
 
-    await workflowCommand("start default \"Regression goal\"", ctx);
+    await workflowCommand('start default "Regression goal"', ctx);
 
     await waitFor(() =>
       (pi.appendEntry as any).mock.calls.some(
@@ -226,10 +227,7 @@ describe("workflow clarification regression", () => {
     });
     expect(firstWaitingState?.wave).toBeUndefined();
 
-    await inputHandler(
-      { source: "user", text: "Please proceed with the planned feature." },
-      ctx,
-    );
+    await inputHandler({ source: "user", text: "Please proceed with the planned feature." }, ctx);
 
     await waitFor(() =>
       (pi.appendEntry as any).mock.calls.some(
@@ -258,5 +256,4 @@ describe("workflow clarification regression", () => {
     expect(resumedWaveState?.waveIndex).toBe(0);
     expect(states.some((state) => state.active === false)).toBe(true);
   });
-
 });
