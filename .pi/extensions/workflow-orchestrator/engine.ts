@@ -29,8 +29,8 @@ export interface TaskFlowInput<TTask, TOutput> {
     output: TOutput | null,
     error?: string,
     reason?: "verification_failed" | "malformed_output" | "error",
-  ) => boolean;
-  applyGenericFailure: (task: TTask, error: string) => boolean;
+  ) => void;
+  applyGenericFailure: (task: TTask, error: string) => void;
 }
 
 function defaultGetField(obj: any, path: string): any {
@@ -56,6 +56,11 @@ export async function runTaskFlow<TTask extends { retries: number }, TOutput>(
   const getNextStageId = input.getNextStageId ?? defaultGetNextStageId;
   let currentStageId = input.startStageId ?? input.stages[0]?.id;
 
+  function recordFailure(): boolean {
+    input.task.retries += 1;
+    return input.task.retries <= input.maxRetries;
+  }
+
   while (currentStageId) {
     if (input.isStopped?.(input.task)) return;
 
@@ -74,8 +79,8 @@ export async function runTaskFlow<TTask extends { retries: number }, TOutput>(
       input.onError?.(stage, input.task, error instanceof Error ? error : new Error(message));
 
       if (stage.id === "verify") {
-        const retry = input.applyVerifyFailure(input.task, stage.id, null, message, "error");
-        if (!retry) {
+        input.applyVerifyFailure(input.task, stage.id, null, message, "error");
+        if (!recordFailure()) {
           input.markFailed(input.task, stage.id);
           return;
         }
@@ -83,8 +88,8 @@ export async function runTaskFlow<TTask extends { retries: number }, TOutput>(
         continue;
       }
 
-      const retry = input.applyGenericFailure(input.task, message);
-      if (!retry) {
+      input.applyGenericFailure(input.task, message);
+      if (!recordFailure()) {
         input.markFailed(input.task, stage.id);
         return;
       }
@@ -123,8 +128,8 @@ export async function runTaskFlow<TTask extends { retries: number }, TOutput>(
     if ((nextStageId === firstStageId || nextStageId === stage.id) && stage.id === "verify") {
       const reason =
         nextStageId === stage.id && !matchedTransition ? "malformed_output" : "verification_failed";
-      const retry = input.applyVerifyFailure(input.task, stage.id, output, undefined, reason);
-      if (!retry) {
+      input.applyVerifyFailure(input.task, stage.id, output, undefined, reason);
+      if (!recordFailure()) {
         input.markFailed(input.task, stage.id);
         return;
       }
