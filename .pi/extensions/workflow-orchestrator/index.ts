@@ -1,4 +1,3 @@
-import "dotenv/config";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type {
@@ -16,6 +15,7 @@ import {
   type WorkflowTask,
   type WorkflowWave,
 } from "./config.js";
+import { loadProjectEnv } from "./env.js";
 import { runTaskFlow } from "./engine.js";
 import { setPmWidgetStatus, setTaskListExpanded, updateStatus } from "./render.js";
 import { RpcAgent } from "./runner.js";
@@ -1160,6 +1160,7 @@ async function stopWorkflow(pi: ExtensionAPI, ctx: ExtensionCommandContext): Pro
 
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
+    loadProjectEnv(ctx.cwd);
     currentState = restoreState(ctx);
     if (currentState?.active) {
       setState(pi, ctx, {

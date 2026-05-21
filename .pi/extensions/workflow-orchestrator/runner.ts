@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@mariozechner/pi-ai";
+import { getSubagentEnv } from "./env.js";
 
 export type AgentRunUpdate =
   | { type: "text_delta"; delta: string }
@@ -114,10 +115,12 @@ export async function runAgent(input: AgentRunInput): Promise<AgentRunResult> {
   const messages: Message[] = [];
   const toolCalls: ToolCallCapture[] = [];
   let stderr = "";
+  let assistantError = "";
 
   const exitCode = await new Promise<number>((resolve) => {
     const proc = spawn("pi", args, {
       cwd: input.cwd,
+      env: getSubagentEnv(input.cwd),
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -158,6 +161,9 @@ export async function runAgent(input: AgentRunInput): Promise<AgentRunResult> {
       if (event.type === "message_end" && event.message) {
         const msg = event.message as Message;
         messages.push(msg);
+        if (event.message.stopReason === "error" && event.message.errorMessage) {
+          assistantError = event.message.errorMessage;
+        }
       }
       if (event.type === "tool_result_end" && event.message) {
         const msg = event.message as Message;
@@ -210,7 +216,7 @@ export async function runAgent(input: AgentRunInput): Promise<AgentRunResult> {
       /* ignore */
     }
 
-  return { outputText, messages, stderr, exitCode, toolCalls };
+  return { outputText, messages, stderr: assistantError || stderr, exitCode, toolCalls };
 }
 
 export class RpcAgent {
@@ -263,6 +269,7 @@ export class RpcAgent {
 
     this.proc = spawn("pi", args, {
       cwd: this.options.cwd,
+      env: getSubagentEnv(this.options.cwd),
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -383,6 +390,13 @@ export class RpcAgent {
     if (event.type === "message_end" && event.message?.role === "assistant") {
       const run = this.currentRun;
       if (!run) return; // Race condition: agent_end may have cleared currentRun
+
+      if (event.message.stopReason === "error" && event.message.errorMessage) {
+        this.lastToolCalls = [...run.toolCalls];
+        this.currentRun = null;
+        run.reject(new Error(event.message.errorMessage));
+        return;
+      }
 
       const msg = event.message as Message;
       for (const part of msg.content) {
