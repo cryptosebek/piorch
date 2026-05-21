@@ -153,9 +153,9 @@ Edit `.pi/workflows/default.workflow.json` to customize:
 - **agent names** - Which agent files to use (pm, developer, verifier)
 - **stages and transitions** - Customize the dev/verify loop
 - **wave source** - PM-driven or static task waves
-- **parallelism** - How many tasks to run concurrently (default: 1)
+- **parallelism** - How many tasks to run concurrently (default: 4)
 - **maxWaves** - Maximum number of waves (default: 10)
-- **maxTaskRetries** - Retry limit per task (default: 2)
+- **maxTaskRetries** - Retry limit per task (default: 6)
 - **maxPmRetries** - Retry limit for PM wave generation (default: 3)
 - **allowedExtensions** - Whitelist extensions for all subagents
 - **allowedExtensionsByAgent** - Per-agent extension allowlists
