@@ -248,14 +248,6 @@ Run `/reload` after changing configuration files.
 - `/workflow collapse`
 - `/workflow help`
 
-## TODO
-
-- Better UI (colors, task grouping)
-- Fix user messages not appearing in chat
-- Expand task management capabilities
-- Add integration tests for RPC runner and end-to-end flows
-- User message routing to PM can swallow chat: no toggle to return to normal chat
-
 ## License
 
 MIT
