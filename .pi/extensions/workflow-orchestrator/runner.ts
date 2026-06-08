@@ -3,7 +3,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@mariozechner/pi-ai";
-import { getSubagentEnv } from "./env.js";
 
 export type AgentRunUpdate =
   | { type: "text_delta"; delta: string }
@@ -239,7 +238,6 @@ export async function runAgent(input: AgentRunInput): Promise<AgentRunResult> {
   const exitCode = await new Promise<number>((resolve) => {
     const proc = spawn("pi", args, {
       cwd: input.cwd,
-      env: getSubagentEnv(input.cwd),
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -390,7 +388,6 @@ export class RpcAgent {
 
     this.proc = spawn("pi", args, {
       cwd: this.options.cwd,
-      env: getSubagentEnv(this.options.cwd),
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
     });

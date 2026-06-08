@@ -7,7 +7,7 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "types": ["node", "bun-types"]
+    "types": ["node", "bun"]
   },
   "include": [".pi/extensions/**/*.ts", "tests/**/*.ts"]
 }
