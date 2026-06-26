@@ -244,14 +244,14 @@ describe("agent retry helpers", () => {
     expect(getAgentRetryDelayMs(3, retry, undefined, () => 0.5)).toBe(2550);
   });
 
-  it("honors retry-after hints from provider errors", () => {
+  it("honors retry-after hints from provider errors up to maxDelayMs", () => {
     const retry = normalizeAgentRetryOptions({
       initialDelayMs: 1000,
       maxDelayMs: 2000,
       jitterMs: 1000,
     });
 
-    expect(getAgentRetryDelayMs(1, retry, new Error("429 retry-after: 7"), () => 0.5)).toBe(7000);
+    expect(getAgentRetryDelayMs(1, retry, new Error("429 retry-after: 7"), () => 0.5)).toBe(2000);
     expect(getAgentRetryDelayMs(1, retry, new Error("try again in 250ms"), () => 0.5)).toBe(250);
   });
 });

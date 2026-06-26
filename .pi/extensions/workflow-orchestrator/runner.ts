@@ -144,7 +144,7 @@ export function getAgentRetryDelayMs(
   random: () => number = Math.random,
 ): number {
   const retryAfterMs = parseRetryAfterMs(error);
-  if (retryAfterMs !== undefined) return retryAfterMs;
+  if (retryAfterMs !== undefined) return Math.min(retryAfterMs, retry.maxDelayMs);
 
   const exponent = Math.max(0, failedAttempt - 1);
   const exponentialDelay = retry.initialDelayMs * retry.backoffMultiplier ** exponent;
@@ -358,6 +358,8 @@ export class RpcAgent {
 
   start(): void {
     if (this.proc) return;
+    this.buffer = "";
+    this.stderr = "";
 
     const args: string[] = [
       "--mode",
