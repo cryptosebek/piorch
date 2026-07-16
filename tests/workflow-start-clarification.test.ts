@@ -133,6 +133,10 @@ function createMockContext(branch: any[] = []): ExtensionCommandContext {
   return {
     cwd: process.cwd(),
     hasUI: false,
+    model: { id: "test/model" },
+    modelRegistry: {
+      getAvailable: () => [{ id: "test/model", provider: "test" }],
+    },
     sessionManager: {
       getBranch: vi.fn().mockImplementation(() => branch),
     },

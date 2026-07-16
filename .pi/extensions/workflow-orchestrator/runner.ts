@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@mariozechner/pi-ai";
+import { formatSubagentError } from "./utils.js";
 
 export type AgentRunUpdate =
   | { type: "text_delta"; delta: string }
@@ -333,7 +334,13 @@ export async function runAgent(input: AgentRunInput): Promise<AgentRunResult> {
       /* ignore */
     }
 
-  return { outputText, messages, stderr: assistantError || stderr, exitCode, toolCalls };
+  return {
+    outputText,
+    messages,
+    stderr: formatSubagentError(assistantError || stderr),
+    exitCode,
+    toolCalls,
+  };
 }
 
 export class RpcAgent {
@@ -586,7 +593,7 @@ export class RpcAgent {
 
   private handleClose(): void {
     if (this.currentRun) {
-      this.currentRun.reject(new Error(this.stderr || "RPC agent terminated"));
+      this.currentRun.reject(new Error(formatSubagentError(this.stderr || "RPC agent terminated")));
       this.currentRun = null;
     }
     this.proc = null;

@@ -1,8 +1,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getAgentDir, parseFrontmatter } from "@mariozechner/pi-coding-agent";
+import { getPackagePiRoot } from "./setup.js";
 
-export type AgentSource = "user" | "project";
+export type AgentSource = "user" | "project" | "package";
 
 export interface AgentConfig {
   name: string;
@@ -89,8 +90,12 @@ export function discoverAgents(cwd: string): AgentDiscoveryResult {
   const projectAgentsDir = findNearestProjectAgentsDir(cwd);
   const userAgents = loadAgentsFromDir(userDir, "user");
   const projectAgents = projectAgentsDir ? loadAgentsFromDir(projectAgentsDir, "project") : [];
+  const packageAgents = projectAgentsDir
+    ? []
+    : loadAgentsFromDir(path.join(getPackagePiRoot(), "agents"), "package");
 
   const agentMap = new Map<string, AgentConfig>();
+  for (const agent of packageAgents) agentMap.set(agent.name, agent);
   for (const agent of userAgents) agentMap.set(agent.name, agent);
   for (const agent of projectAgents) agentMap.set(agent.name, agent);
 

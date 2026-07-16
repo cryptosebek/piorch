@@ -80,4 +80,14 @@ describe("normalizeGoal", () => {
   it("returns unquoted text as-is", () => {
     expect(normalizeGoal("Build a bot")).toBe("Build a bot");
   });
+
+  it("strips stray quotes from broken tokenization", () => {
+    expect(normalizeGoal('"build something"')).toBe("build something");
+    expect(normalizeGoal('"build')).toBe("build");
+    expect(normalizeGoal('something"')).toBe("something");
+  });
+
+  it("preserves quotes that are part of the goal", () => {
+    expect(normalizeGoal('"foo" bug')).toBe('"foo" bug');
+  });
 });

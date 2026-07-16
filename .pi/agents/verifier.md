@@ -1,7 +1,7 @@
 ---
 name: verifier
 description: Reviews developer work and validates requirements.
-model: openrouter/stepfun/step-3.5-flash:free
+model: openrouter/free
 tools: read,grep,find,ls,bash
 ---
 

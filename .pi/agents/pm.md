@@ -1,7 +1,7 @@
 ---
 name: pm
 description: Project manager who plans and delegates tasks in waves.
-model: openrouter/stepfun/step-3.5-flash:free
+model: openrouter/free
 tools: read,grep,find,ls
 ---
 

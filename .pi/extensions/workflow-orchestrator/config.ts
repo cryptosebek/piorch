@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
-import * as path from "node:path";
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import { resolveWorkflowPath } from "./setup.js";
 
 const TransitionSchema = Type.Object({
   when: Type.Object({
@@ -110,10 +110,7 @@ function sanitizeWorkflowName(name: string): string {
 
 export function loadWorkflowConfig(cwd: string, name: string): LoadedWorkflow {
   const safeName = sanitizeWorkflowName(name);
-  const workflowPath = path.join(cwd, ".pi", "workflows", `${safeName}.workflow.json`);
-  if (!fs.existsSync(workflowPath)) {
-    throw new Error(`Workflow not found: ${workflowPath}`);
-  }
+  const workflowPath = resolveWorkflowPath(cwd, safeName);
 
   const raw = fs.readFileSync(workflowPath, "utf-8");
   let parsed: unknown;

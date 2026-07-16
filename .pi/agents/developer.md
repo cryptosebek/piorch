@@ -1,7 +1,7 @@
 ---
 name: developer
 description: Implements assigned tasks.
-model: openrouter/stepfun/step-3.5-flash:free
+model: openrouter/free
 tools: read,edit,write,bash,grep,find,ls
 ---
 

@@ -15,8 +15,10 @@ pi
 Then:
 
 ```
-/workflow start default "Your goal"
+/workflow "Your goal"
 ```
+
+First `/workflow` run copies editable agent and workflow files into `.pi/`. Edit them to customize, then `/reload`.
 
 Reload extensions:
 
