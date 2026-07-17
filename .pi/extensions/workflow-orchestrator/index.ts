@@ -10,6 +10,7 @@ import type {
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { discoverAgents, findAgentByName } from "./agents.js";
+import { parseWorkflowStartArgs, tokenizeWorkflowArgs, WORKFLOW_COMMANDS } from "./commands.js";
 import {
   loadWorkflowConfig,
   type WorkflowConfig,
@@ -40,6 +41,7 @@ import {
   type SemanticStageId,
   type VerifierReport,
 } from "./contracts.js";
+import { materializeProjectDefaults } from "./setup.js";
 import { normalizeGoal } from "./utils.js";
 
 const execFile = promisify(nodeExecFile);
@@ -229,9 +231,12 @@ async function compareDeclaredFiles(
   declaredFiles: string[],
 ): Promise<string | undefined> {
   try {
-    const { stdout } = await execFile("git", ["diff", "--name-only"], { cwd, shell: false });
+    const [{ stdout: diffStdout }, { stdout: untrackedStdout }] = await Promise.all([
+      execFile("git", ["diff", "--name-only"], { cwd, shell: false }),
+      execFile("git", ["ls-files", "--others", "--exclude-standard"], { cwd, shell: false }),
+    ]);
     const actual = new Set(
-      String(stdout)
+      `${String(diffStdout)}\n${String(untrackedStdout)}`
         .split(/\r?\n/)
         .map((file) => file.trim().replaceAll("\\", "/"))
         .filter(Boolean),
@@ -522,7 +527,7 @@ function getTaskRunner(
     cwd: ctx.cwd,
     sessionFile,
     systemPrompt: agent.systemPrompt,
-    model: agent.model,
+    model: currentState.model ?? agent.model,
     tools: agent.tools,
     allowedExtensions: resolveAllowedExtensions(agentName, config, currentState),
     piCommand: config.piCommand,
@@ -914,7 +919,7 @@ function getPmRunner(
     cwd: ctx.cwd,
     sessionFile,
     systemPrompt: pmAgent.systemPrompt,
-    model: pmAgent.model,
+    model: currentState.model ?? pmAgent.model,
     tools: pmAgent.tools,
     allowedExtensions: resolveAllowedExtensions(pmAgent.name, config, currentState),
     piCommand: config.piCommand,
@@ -1216,6 +1221,7 @@ async function startWorkflow(
   ctx: ExtensionCommandContext,
   workflowName: string,
   goalOverride?: string,
+  modelOverride?: string,
 ): Promise<void> {
   if (currentRun) {
     if (ctx.hasUI) ctx.ui.notify("Workflow already running", "warning");
@@ -1240,6 +1246,7 @@ async function startWorkflow(
         runId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
         workflowName: effectiveConfig.name,
         goal: effectiveConfig.goal,
+        model: modelOverride,
         status: "running",
         active: true,
         waveIndex: 0,
@@ -1384,6 +1391,7 @@ async function stopWorkflow(pi: ExtensionAPI, ctx: ExtensionCommandContext): Pro
 
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
+    materializeProjectDefaults(ctx.cwd);
     currentState = restoreState(ctx);
     if (currentState?.active) {
       setState(pi, ctx, {
@@ -1479,7 +1487,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("workflow", {
     description: "Manage workflow orchestrator",
     handler: async (args, ctx) => {
-      const tokens = (args || "").split(/\s+/).filter(Boolean);
+      const tokens = tokenizeWorkflowArgs(args || "");
       const command = tokens[0];
       const name = tokens[1];
       const goalText = normalizeGoal(tokens.slice(2).join(" "));
@@ -1490,6 +1498,7 @@ export default function (pi: ExtensionAPI) {
           [
             "Workflow commands:",
             "  /workflow start <name> [goal]",
+            '  /workflow "goal" [--model <id>]',
             "  /workflow resume",
             "  /workflow status",
             "  /workflow stop",
@@ -1504,8 +1513,9 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      if (command === "start") {
-        if (!name) {
+      if (command === "start" || !WORKFLOW_COMMANDS.has(command)) {
+        const parsed = parseWorkflowStartArgs(command === "start" ? tokens : ["start", ...tokens]);
+        if (!parsed) {
           ctx.ui?.notify("Usage: /workflow start <name> [goal]", "warning");
           return;
         }
@@ -1513,11 +1523,13 @@ export default function (pi: ExtensionAPI) {
           ctx.ui?.notify("Existing workflow state found. Use /workflow resume.", "warning");
           return;
         }
-        void startWorkflow(pi, ctx, name, goalText).catch((error: unknown) => {
-          const message = error instanceof Error ? error.message : String(error);
-          sendWorkflowNotice(pi, `Workflow could not start: ${message}`);
-          if (ctx.hasUI) ctx.ui.notify(message, "error");
-        });
+        void startWorkflow(pi, ctx, parsed.workflowName, parsed.goal, parsed.model).catch(
+          (error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            sendWorkflowNotice(pi, `Workflow could not start: ${message}`);
+            if (ctx.hasUI) ctx.ui.notify(message, "error");
+          },
+        );
         return;
       }
 

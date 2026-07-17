@@ -98,6 +98,7 @@ export const WorkflowStateSchema = Type.Object({
   runId: IdentifierSchema,
   workflowName: IdentifierSchema,
   goal: Type.String({ minLength: 1, maxLength: 4000 }),
+  model: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
   status: WorkflowStatusSchema,
   active: Type.Boolean(),
   waveIndex: Type.Integer({ minimum: 0 }),
@@ -139,6 +140,7 @@ export interface WorkflowState {
   runId: string;
   workflowName: string;
   goal: string;
+  model?: string;
   status: WorkflowStatus;
   /** Compatibility field for older renderers. `status` is authoritative. */
   active: boolean;
@@ -156,7 +158,6 @@ export interface WorkflowState {
   waveSummaries?: PriorWaveSummary[];
   waitingForClarification?: boolean;
   clarificationToken?: string;
-  model?: string;
 }
 
 export const STATE_TYPE = "workflow-state";
