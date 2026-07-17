@@ -1,9 +1,10 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import * as path from "node:path";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 
 type RegisteredHandlers = {
   commands: Record<string, (args: string, ctx: ExtensionCommandContext) => Promise<void> | void>;
@@ -13,6 +14,27 @@ type RegisteredHandlers = {
 type FakeRpcOptions = {
   systemPrompt?: string;
 };
+
+function fakeResult(outputText: string, toolCalls: Array<{ name: string; arguments: any }> = []) {
+  const calls = Array.isArray(toolCalls) ? toolCalls : [];
+  const executions = calls.map((call, index) => ({
+    toolCallId: `fake-${index + 1}`,
+    name: call.name,
+    attemptedArgs: call.arguments,
+    startedAt: 1,
+    endedAt: 2,
+    isError: false,
+    result: { details: { params: call.arguments } },
+  }));
+  return {
+    outputText,
+    executions,
+    successfulToolExecutions: executions,
+    failedToolExecutions: [],
+    stderr: "",
+    lifecycleEvents: ["agent_settled"],
+  };
+}
 
 const rpcInstances: FakeRpcAgent[] = [];
 
@@ -44,17 +66,17 @@ class FakeRpcAgent {
     return this.toolCalls;
   }
 
-  async runPrompt(message: string): Promise<string> {
+  async runPrompt(message: string): Promise<any> {
     this.toolCalls = [];
 
     if (this.role === "pm") {
       if (message.includes("User message:")) {
-        return "Thanks, I have the clarification.";
+        return fakeResult("Thanks, I have the clarification.");
       }
 
       this.pmWaveCalls += 1;
       if (this.pmWaveCalls === 1) {
-        return "I need a little clarification before I can generate the wave.";
+        return fakeResult("I need a little clarification before I can generate the wave.");
       }
 
       if (this.pmWaveCalls === 2) {
@@ -78,7 +100,7 @@ class FakeRpcAgent {
             },
           },
         ];
-        return "";
+        return fakeResult("", this.toolCalls);
       }
 
       this.toolCalls = [
@@ -87,7 +109,7 @@ class FakeRpcAgent {
           arguments: { done: true },
         },
       ];
-      return "";
+      return fakeResult("", this.toolCalls);
     }
 
     if (this.role === "developer") {
@@ -98,11 +120,14 @@ class FakeRpcAgent {
             status: "done",
             summary: "Implemented the feature.",
             filesChanged: ["src/feature.ts"],
-            notes: "Looks good.",
+            evidence: [
+              { kind: "test", description: "The implementation tests pass", outcome: "pass" },
+            ],
+            issues: [],
           },
         },
       ];
-      return "";
+      return fakeResult("", this.toolCalls);
     }
 
     if (this.role === "verifier") {
@@ -111,19 +136,34 @@ class FakeRpcAgent {
           name: "report_task_result",
           arguments: {
             status: "pass",
+            summary: "Verification passed.",
+            evidence: [{ kind: "test", description: "The tests pass", outcome: "pass" }],
             issues: [],
           },
         },
       ];
-      return "";
+      return fakeResult("", this.toolCalls);
     }
 
-    return "";
+    return fakeResult("");
   }
 }
 
-vi.mock("../.pi/extensions/workflow-orchestrator/runner.js", () => {
-  return { RpcAgent: FakeRpcAgent };
+vi.doMock(path.resolve(".pi/extensions/workflow-orchestrator/runner.ts"), () => {
+  return {
+    RpcAgent: FakeRpcAgent,
+    preflightPiExecutable: vi.fn().mockResolvedValue({ command: "pi", version: "0.80.10" }),
+    selectStructuredToolResult: (result: any, expectedToolName: string) => {
+      const matches = result.executions.filter(
+        (execution: any) =>
+          execution.name === expectedToolName &&
+          execution.endedAt !== undefined &&
+          execution.isError === false,
+      );
+      if (matches.length !== 1) throw new Error(`expected one ${expectedToolName} result`);
+      return { execution: matches[0], params: matches[0].result.details.params };
+    },
+  };
 });
 
 const { default: registerWorkflowExtension } =

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { WorkflowState, TaskState } from "../.pi/extensions/workflow-orchestrator/state.js";
 import {
   updateStatus,
@@ -50,6 +50,7 @@ describe("render.ts", () => {
       runId: "test-run",
       workflowName: "default",
       goal: "Test goal",
+      status: "running",
       active: true,
       waveIndex: 0,
       wave: { goal: "Wave 1", tasks: [] },
@@ -146,7 +147,10 @@ describe("render.ts", () => {
 
       updateStatus(mockCtx, state);
 
-      expect(mockUi.setStatus).toHaveBeenCalledWith("workflow", "Wave 3: 2/4 verified, 1 failed");
+      expect(mockUi.setStatus).toHaveBeenCalledWith(
+        "workflow",
+        "running: Wave 3: 2/4 verified, 1 failed",
+      );
     });
 
     it("shows all tasks verified", () => {
@@ -156,7 +160,7 @@ describe("render.ts", () => {
 
       updateStatus(mockCtx, state);
 
-      expect(mockUi.setStatus).toHaveBeenCalledWith("workflow", "Wave 1: 2/2 verified");
+      expect(mockUi.setStatus).toHaveBeenCalledWith("workflow", "running: Wave 1: 2/2 verified");
     });
 
     it("sorts tasks by status (in_progress first)", () => {
@@ -458,7 +462,7 @@ describe("render.ts", () => {
 
       updateStatus(mockCtx, state);
 
-      expect(mockUi.setStatus).toHaveBeenCalledWith("workflow", "Wave 1: 0/0 verified");
+      expect(mockUi.setStatus).toHaveBeenCalledWith("workflow", "running: Wave 1: 0/0 verified");
       expect(mockUi.setWidget).toHaveBeenCalled();
     });
   });

@@ -43,20 +43,29 @@ Reload extensions:
 
 - Subagents run in **RPC mode** with per-task session files at:
   `.pi/workflows/sessions/<runId>/<taskId>-<stage>.jsonl`
+- The PM session is also scoped to the run at:
+  `.pi/workflows/sessions/<runId>/pm.jsonl`
 - `/workflow stop-task <id>` aborts a task but keeps session context.
 - `/workflow message <id> <text>` sends a steer message to the running task, or resumes a stopped task.
 - `/workflow resume` restarts the workflow loop from the saved state without starting new agents automatically.
 - While workflow is active, normal chat is routed to PM (commands still work).
 
+Pi `0.80.10` is the supported child runtime (`>=0.80.10 <0.81.0`); workflow
+startup performs a version preflight and refuses unsupported executables.
+Persisted workflow status is authoritative: `running`,
+`waiting_for_clarification`, `stopping`, `completed`, `exhausted`, `failed`,
+`stopped`, and `partial` distinguish active and terminal outcomes.
+
 ## Session file format
 
-Session files are JSONL (one JSON event per line):
+Session files are Pi session trees stored as JSONL (one JSON entry per line):
 
 ```jsonl
 {"type":"prompt","message":"Project goal: Build a bot\nTask: T1..."}
 {"type":"message_end","message":{"role":"assistant","content":[...]}}
-{"type":"tool_execution_start","toolName":"report_task_result","args":{"status":"done",...}}
-{"type":"agent_end"}
+{"type":"tool_execution_start","toolCallId":"call-1","toolName":"report_task_result","args":{"status":"done",...}}
+{"type":"tool_execution_end","toolCallId":"call-1","toolName":"report_task_result","isError":false,"result":{"details":{"params":{...}}}}
+{"type":"agent_settled"}
 ```
 
 **Key event types:**
@@ -64,11 +73,13 @@ Session files are JSONL (one JSON event per line):
 - `prompt` - The prompt sent to the agent
 - `message_end` - Agent's text response
 - `tool_execution_start` - Tool call with arguments (this is captured for structured output)
-- `agent_end` - Agent completed
+- `tool_execution_start` / `tool_execution_end` - Correlated custom-tool lifecycle
+- `agent_end` - One low-level agent turn ended; it is not the accepted terminal event
+- `agent_settled` - Pi finished the accepted prompt, including retry/continuation handling
 
 **Locations:**
 
-- PM sessions: `.pi/workflows/sessions/pm-<workflow>.jsonl`
+- PM sessions: `.pi/workflows/sessions/<runId>/pm.jsonl`
 - Task sessions: `.pi/workflows/sessions/<runId>/<taskId>-<stageId>.jsonl`
 
 ## UI notes
@@ -116,29 +127,38 @@ Agents report via structured tools instead of JSON text:
 
 **Why tools?** Previously, agents output JSON text that was parsed with `extractJson()`. Malformed JSON caused silent failures where verifier reports were lost. Tools provide structured arguments that are captured directly from `tool_execution_start` events.
 
-**Fallback:** If an agent doesn't call the tool, their text output is captured and stored in `stageOutputs[stageId]`. This ensures workflow continuity.
+There is no prose/JSON fallback for stage results. If the required tool does not
+successfully execute exactly once before `agent_settled`, the stage fails with a
+diagnostic rather than being accepted.
 
 **Tool isolation:** Each extension provides specific tools, and `allowedExtensionsByAgent` ensures agents only see their relevant tools.
 
-**PM wave validation:** If the PM returns a wave without a valid `tasks` array, the workflow automatically retries (up to `maxPmRetries` times from workflow config), passing the error message back to the PM so it can correct its output. This prevents crashes from malformed PM responses.
+**PM wave validation:** If the PM makes an invalid tool attempt or returns a
+wave that fails semantic validation, the workflow retries up to `maxPmRetries`
+times and passes the error back to the PM. Assistant prose alone pauses for
+clarification; it never becomes a wave result.
+
+Pi owns transient provider retry through its settings (`retry.enabled`,
+`retry.maxRetries`, and `retry.baseDelayMs`). Workflow retries remain semantic
+retries between PM/developer/verifier stages.
 
 ## Template variables
 
 In workflow JSON `inputTemplate`, you can reference:
 
-| Variable                          | Description                             |
-| --------------------------------- | --------------------------------------- |
-| `{{task.title}}`                  | Task title                              |
-| `{{task.description}}`            | Task description                        |
-| `{{task.requirements}}`           | Verification requirements               |
-| `{{task.issues}}`                 | Current issues (from previous failures) |
-| `{{task.stageOutputs.<stageId>}}` | Output from a previous stage            |
-| `{{workflow.goal}}`               | Project goal                            |
-| `{{wave.goal}}`                   | Current wave goal                       |
-| `{{wave.index}}`                  | Wave number (0-based)                   |
+| Variable                                 | Description                             |
+| ---------------------------------------- | --------------------------------------- |
+| `{{task.title}}`                         | Task title                              |
+| `{{task.description}}`                   | Task description                        |
+| `{{task.requirements}}`                  | Verification requirements               |
+| `{{task.issues}}`                        | Current issues (from previous failures) |
+| `{{task.stageOutputs.<stageId>.report}}` | Validated report from a previous stage  |
+| `{{workflow.goal}}`                      | Project goal                            |
+| `{{wave.goal}}`                          | Current wave goal                       |
+| `{{wave.index}}`                         | Wave number (0-based)                   |
 
 **Example:**
 
 ```json
-"inputTemplate": "Verify task {{task.title}}.\nDev summary: {{task.stageOutputs.develop.summary}}"
+"inputTemplate": "Verify task {{task.title}}.\nDev summary: {{task.stageOutputs.develop.report.summary}}"
 ```

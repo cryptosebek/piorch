@@ -252,7 +252,7 @@ Prompt.
       const result = discoverAgents("/non/existent/path");
 
       expect(result.agents.length).toBeGreaterThan(0);
-      expect(result.agents.every((agent) => agent.source === "package")).toBe(true);
+      expect(result.agents.every((agent) => agent.source === "project")).toBe(true);
       expect(result.projectAgentsDir).toBeNull();
     });
 
@@ -368,9 +368,18 @@ Prompt.
       expect(developer).toBeDefined();
       expect(verifier).toBeDefined();
 
-      expect(pm?.tools).toEqual(["read", "grep", "find", "ls"]);
-      expect(developer?.tools).toEqual(["read", "edit", "write", "bash", "grep", "find", "ls"]);
-      expect(verifier?.tools).toEqual(["read", "grep", "find", "ls", "bash"]);
+      expect(pm?.tools).toEqual(["read", "grep", "find", "ls", "generate_wave"]);
+      expect(developer?.tools).toEqual([
+        "read",
+        "edit",
+        "write",
+        "bash",
+        "grep",
+        "find",
+        "ls",
+        "report_task_result",
+      ]);
+      expect(verifier?.tools).toEqual(["read", "grep", "find", "ls", "bash", "report_task_result"]);
     });
   });
 });

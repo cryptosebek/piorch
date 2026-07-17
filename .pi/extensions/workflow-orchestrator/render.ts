@@ -1,4 +1,4 @@
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { WorkflowState } from "./state.js";
 
 let pmWidgetStatus: string | undefined;
@@ -41,10 +41,17 @@ export function updateStatus(ctx: ExtensionContext, state?: WorkflowState): void
   const verified = state.tasks.filter((task) => task.status === "verified").length;
   const failed = state.tasks.filter((task) => task.status === "failed").length;
 
-  const status = `Wave ${state.waveIndex + 1}: ${verified}/${total} verified${failed ? `, ${failed} failed` : ""}`;
+  const status = `${state.status}: Wave ${state.waveIndex + 1}: ${verified}/${total} verified${failed ? `, ${failed} failed` : ""}`;
   ctx.ui.setStatus("workflow", status);
 
-  const order = { in_progress: 0, pending: 1, stopped: 2, verified: 3, failed: 4 } as const;
+  const order = {
+    in_progress: 0,
+    stopping: 1,
+    pending: 2,
+    stopped: 3,
+    verified: 4,
+    failed: 5,
+  } as const;
   const sortedTasks = [...state.tasks].sort((a, b) => {
     const aOrder = order[a.status] ?? 9;
     const bOrder = order[b.status] ?? 9;
@@ -71,7 +78,7 @@ export function updateStatus(ctx: ExtensionContext, state?: WorkflowState): void
         ? "✓"
         : task.status === "failed"
           ? "✗"
-          : task.status === "stopped"
+          : task.status === "stopped" || task.status === "stopping"
             ? "⏸"
             : task.status === "in_progress"
               ? spinner
@@ -90,7 +97,7 @@ export function updateStatus(ctx: ExtensionContext, state?: WorkflowState): void
           ? "error"
           : task.status === "in_progress"
             ? "warning"
-            : task.status === "stopped"
+            : task.status === "stopped" || task.status === "stopping"
               ? "muted"
               : "text";
     const taskLine = `${header}: ${title}`;

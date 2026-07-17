@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   appendState,
   restoreState,
@@ -7,13 +7,18 @@ import {
   type WorkflowState,
   type TaskState,
 } from "../.pi/extensions/workflow-orchestrator/state.js";
+import type {
+  PriorWaveSummary,
+  StageOutput,
+} from "../.pi/extensions/workflow-orchestrator/contracts.js";
 
-describe("state.ts", () => {
-  function createBaseState(overrides?: Partial<WorkflowState>): WorkflowState {
+describe("workflow state", () => {
+  function createBaseState(overrides: Partial<WorkflowState> = {}): WorkflowState {
     return {
       runId: "test-run-123",
       workflowName: "default",
       goal: "Test workflow goal",
+      status: "running",
       active: true,
       waveIndex: 0,
       wave: { goal: "Wave 1", tasks: [] },
@@ -23,274 +28,177 @@ describe("state.ts", () => {
     };
   }
 
-  function createTask(overrides?: Partial<TaskState>): TaskState {
+  function createTask(overrides: Partial<TaskState> = {}): TaskState {
     return {
       id: "T1",
       title: "Test task",
       description: "Task description",
+      requirements: "Run verification",
       status: "pending",
       retries: 0,
       ...overrides,
-    } as TaskState;
+    };
   }
 
+  const developerOutput: StageOutput = {
+    runId: "test-run-123",
+    waveIndex: 0,
+    taskId: "T1",
+    stageId: "develop",
+    role: "developer",
+    report: {
+      status: "done",
+      summary: "Implemented",
+      filesChanged: ["src/index.ts"],
+      evidence: [{ kind: "test", description: "Unit tests pass", outcome: "pass" }],
+      issues: [],
+    },
+    toolCallId: "developer-call",
+    startedAt: 1,
+    completedAt: 2,
+  };
+
+  const verifierOutput: StageOutput = {
+    runId: "test-run-123",
+    waveIndex: 0,
+    taskId: "T1",
+    stageId: "verify",
+    role: "verifier",
+    report: {
+      status: "pass",
+      summary: "Verified",
+      evidence: [{ kind: "test", description: "Verification pass", outcome: "pass" }],
+      issues: [],
+    },
+    toolCallId: "verifier-call",
+    startedAt: 3,
+    completedAt: 4,
+  };
+
+  const summary: PriorWaveSummary = {
+    waveIndex: 0,
+    goal: "Wave 1",
+    outcome: "verified",
+    tasks: [
+      {
+        id: "T1",
+        title: "Test task",
+        status: "verified",
+        retries: 0,
+        developerSummary: "Implemented",
+        filesChanged: ["src/index.ts"],
+        verifierSummary: "Verified",
+        evidence: [{ kind: "test", description: "Pass", outcome: "pass" }],
+        issues: [],
+      },
+    ],
+  };
+
   describe("appendState", () => {
-    it("appends state to session via extension API", () => {
-      const mockPi = {
-        appendEntry: vi.fn(),
-      } as unknown as ExtensionAPI;
-
+    it("appends a valid state through the extension API", () => {
+      const pi = { appendEntry: vi.fn() } as unknown as ExtensionAPI;
       const state = createBaseState();
-      appendState(mockPi, state);
-
-      expect(mockPi.appendEntry).toHaveBeenCalledWith(STATE_TYPE, state);
+      appendState(pi, state);
+      expect(pi.appendEntry).toHaveBeenCalledWith(STATE_TYPE, state);
     });
 
-    it("appends state with tasks", () => {
-      const mockPi = {
-        appendEntry: vi.fn(),
-      } as unknown as ExtensionAPI;
-
-      const state = createBaseState({
-        tasks: [
-          createTask({ id: "T1", status: "in_progress" }),
-          createTask({ id: "T2", status: "verified" }),
-        ],
-      });
-
-      appendState(mockPi, state);
-
-      expect(mockPi.appendEntry).toHaveBeenCalledWith(
-        STATE_TYPE,
-        expect.objectContaining({
-          tasks: expect.arrayContaining([
-            expect.objectContaining({ id: "T1" }),
-            expect.objectContaining({ id: "T2" }),
-          ]),
-        }),
-      );
-    });
-
-    it("appends state with allowedExtensions", () => {
-      const mockPi = {
-        appendEntry: vi.fn(),
-      } as unknown as ExtensionAPI;
-
+    it("persists typed tasks, stage outputs, summaries, and extension allowlists", () => {
+      const pi = { appendEntry: vi.fn() } as unknown as ExtensionAPI;
       const state = createBaseState({
         allowedExtensions: ["/path/to/extension.ts"],
-      });
-
-      appendState(mockPi, state);
-
-      expect(mockPi.appendEntry).toHaveBeenCalledWith(
-        STATE_TYPE,
-        expect.objectContaining({
-          allowedExtensions: ["/path/to/extension.ts"],
-        }),
-      );
-    });
-
-    it("appends state with allowedExtensionsByAgent", () => {
-      const mockPi = {
-        appendEntry: vi.fn(),
-      } as unknown as ExtensionAPI;
-
-      const state = createBaseState({
         allowedExtensionsByAgent: {
-          pm: ["./.pi/extensions/workflow-pm-tools/index.ts"],
-          developer: ["./.pi/extensions/workflow-task-tools/index.ts"],
-          verifier: ["./.pi/extensions/workflow-task-tools/index.ts"],
+          pm: ["./pm.ts"],
+          developer: ["./developer.ts"],
+          verifier: ["./verifier.ts"],
         },
+        previousSummary: summary,
+        waveSummaries: [summary],
+        tasks: [
+          createTask({
+            status: "verified",
+            stageId: "verify",
+            stageOutputs: { develop: developerOutput, verify: verifierOutput },
+            sessionFiles: { develop: ".pi/sessions/T1-develop.jsonl" },
+            sessionResetCounts: { develop: 1 },
+          }),
+        ],
       });
-
-      appendState(mockPi, state);
-
-      expect(mockPi.appendEntry).toHaveBeenCalledWith(
-        STATE_TYPE,
-        expect.objectContaining({
-          allowedExtensionsByAgent: {
-            pm: expect.arrayContaining(["./.pi/extensions/workflow-pm-tools/index.ts"]),
-            developer: expect.arrayContaining(["./.pi/extensions/workflow-task-tools/index.ts"]),
-            verifier: expect.arrayContaining(["./.pi/extensions/workflow-task-tools/index.ts"]),
-          },
-        }),
-      );
+      appendState(pi, state);
+      expect(pi.appendEntry).toHaveBeenCalledWith(STATE_TYPE, state);
     });
 
-    it("appends state with previousSummary", () => {
-      const mockPi = {
-        appendEntry: vi.fn(),
-      } as unknown as ExtensionAPI;
-
+    it("preserves clarification state and stopped tasks", () => {
+      const pi = { appendEntry: vi.fn() } as unknown as ExtensionAPI;
       const state = createBaseState({
-        previousSummary: "Previous wave completed successfully",
-      });
-
-      appendState(mockPi, state);
-
-      expect(mockPi.appendEntry).toHaveBeenCalledWith(
-        STATE_TYPE,
-        expect.objectContaining({
-          previousSummary: "Previous wave completed successfully",
-        }),
-      );
-    });
-
-    it("appends state with waveSummaries", () => {
-      const mockPi = {
-        appendEntry: vi.fn(),
-      } as unknown as ExtensionAPI;
-
-      const state = createBaseState({
-        waveSummaries: ["Wave 1: Setup project", "Wave 2: Implement features"],
-      });
-
-      appendState(mockPi, state);
-
-      expect(mockPi.appendEntry).toHaveBeenCalledWith(
-        STATE_TYPE,
-        expect.objectContaining({
-          waveSummaries: expect.arrayContaining([
-            "Wave 1: Setup project",
-            "Wave 2: Implement features",
-          ]),
-        }),
-      );
-    });
-
-    it("appends state with waitingForClarification flag", () => {
-      const mockPi = {
-        appendEntry: vi.fn(),
-      } as unknown as ExtensionAPI;
-
-      const state = createBaseState({
+        status: "waiting_for_clarification",
+        active: true,
         waitingForClarification: true,
+        clarificationToken: "clarification-1",
+        tasks: [createTask({ status: "stopped", resumeMessage: "Continue from here" })],
       });
-
-      appendState(mockPi, state);
-
-      expect(mockPi.appendEntry).toHaveBeenCalledWith(
-        STATE_TYPE,
-        expect.objectContaining({
-          waitingForClarification: true,
-        }),
-      );
+      appendState(pi, state);
+      expect(pi.appendEntry).toHaveBeenCalledWith(STATE_TYPE, state);
     });
 
-    it("updates timestamp on append", () => {
-      const mockPi = {
-        appendEntry: vi.fn(),
-      } as unknown as ExtensionAPI;
-
-      const originalTime = Date.now() - 10000;
-      const state = createBaseState({ updatedAt: originalTime });
-
-      appendState(mockPi, state);
-
-      const capturedState = (mockPi.appendEntry as any).mock.calls[0][1] as WorkflowState;
-      expect(capturedState.updatedAt).toBeGreaterThanOrEqual(originalTime);
+    it("rejects malformed state before persistence", () => {
+      const pi = { appendEntry: vi.fn() } as unknown as ExtensionAPI;
+      const state = createBaseState({ status: "invalid" as WorkflowState["status"] });
+      expect(() => appendState(pi, state)).toThrow("Workflow state validation failed");
+      expect(pi.appendEntry).not.toHaveBeenCalled();
     });
   });
 
   describe("restoreState", () => {
-    it("restores state from session entries", () => {
-      const stateToRestore = createBaseState();
-
-      const mockCtx = {
+    it("restores the latest typed state and skips unrelated entries", () => {
+      const state = createBaseState();
+      const ctx = {
         sessionManager: {
-          getBranch: vi.fn().mockReturnValue([
-            { type: "message", role: "user", content: "Hello" },
-            { type: "custom", customType: STATE_TYPE, data: stateToRestore },
-            { type: "message", role: "assistant", content: "Hi" },
-          ]),
+          getBranch: vi
+            .fn()
+            .mockReturnValue([
+              { type: "message" },
+              { type: "custom", customType: "other", data: {} },
+              { type: "custom", customType: STATE_TYPE, data: state },
+            ]),
         },
       } as unknown as ExtensionContext;
-
-      const restored = restoreState(mockCtx);
-
-      expect(restored).toEqual(stateToRestore);
+      expect(restoreState(ctx)).toEqual(state);
     });
 
-    it("returns latest state when multiple states exist", () => {
+    it("returns the latest state when multiple state entries exist", () => {
       const oldState = createBaseState({ waveIndex: 0 });
       const newState = createBaseState({ waveIndex: 1 });
-
-      const mockCtx = {
+      const ctx = {
         sessionManager: {
           getBranch: vi.fn().mockReturnValue([
             { type: "custom", customType: STATE_TYPE, data: oldState },
-            { type: "message", role: "user", content: "Continue" },
             { type: "custom", customType: STATE_TYPE, data: newState },
           ]),
         },
       } as unknown as ExtensionContext;
-
-      const restored = restoreState(mockCtx);
-
-      expect(restored).toEqual(newState);
+      expect(restoreState(ctx)).toEqual(newState);
     });
 
-    it("returns undefined when no state in session", () => {
-      const mockCtx = {
-        sessionManager: {
-          getBranch: vi.fn().mockReturnValue([
-            { type: "message", role: "user", content: "Hello" },
-            { type: "message", role: "assistant", content: "Hi" },
-          ]),
-        },
+    it("returns undefined when the session has no state", () => {
+      const ctx = {
+        sessionManager: { getBranch: vi.fn().mockReturnValue([{ type: "message" }]) },
       } as unknown as ExtensionContext;
-
-      const restored = restoreState(mockCtx);
-
-      expect(restored).toBeUndefined();
+      expect(restoreState(ctx)).toBeUndefined();
     });
 
-    it("returns undefined for empty session", () => {
-      const mockCtx = {
-        sessionManager: {
-          getBranch: vi.fn().mockReturnValue([]),
-        },
-      } as unknown as ExtensionContext;
-
-      const restored = restoreState(mockCtx);
-
-      expect(restored).toBeUndefined();
-    });
-
-    it("skips non-custom entries", () => {
-      const stateToRestore = createBaseState();
-
-      const mockCtx = {
-        sessionManager: {
-          getBranch: vi.fn().mockReturnValue([
-            { type: "message", role: "user", content: "Hello" },
-            { type: "tool", name: "read", content: "" },
-            { type: "custom", customType: "other-type", data: { foo: "bar" } },
-            { type: "custom", customType: STATE_TYPE, data: stateToRestore },
-          ]),
-        },
-      } as unknown as ExtensionContext;
-
-      const restored = restoreState(mockCtx);
-
-      expect(restored).toEqual(stateToRestore);
-    });
-
-    it("restores state with complex task data", () => {
-      const complexState = createBaseState({
+    it("restores complex typed task data", () => {
+      const state = createBaseState({
         tasks: [
           createTask({
-            id: "T1",
             status: "verified",
             stageId: "verify",
             retries: 1,
             issues: ["Initial issue fixed"],
-            stageOutputs: {
-              develop: { status: "done", summary: "Implemented", filesChanged: ["src/index.ts"] },
-              verify: { status: "pass", issues: [] },
-            },
+            stageOutputs: { develop: developerOutput, verify: verifierOutput },
             lastAgent: "verifier",
             lastNote: "Verification passed",
+            lastOutput: "Verified",
+            lastActivityAt: 10,
             sessionFiles: {
               develop: ".pi/workflows/sessions/run1/T1-develop.jsonl",
               verify: ".pi/workflows/sessions/run1/T1-verify.jsonl",
@@ -298,78 +206,71 @@ describe("state.ts", () => {
           }),
         ],
       });
-
-      const mockCtx = {
+      const ctx = {
         sessionManager: {
           getBranch: vi
             .fn()
-            .mockReturnValue([{ type: "custom", customType: STATE_TYPE, data: complexState }]),
+            .mockReturnValue([{ type: "custom", customType: STATE_TYPE, data: state }]),
         },
       } as unknown as ExtensionContext;
-
-      const restored = restoreState(mockCtx);
-
-      expect(restored).toEqual(complexState);
-      expect(restored?.tasks[0].stageOutputs?.develop).toEqual({
-        status: "done",
-        summary: "Implemented",
-        filesChanged: ["src/index.ts"],
-      });
+      expect(restoreState(ctx)).toEqual(state);
     });
 
-    it("restores state with resumeMessage", () => {
-      const stateWithResume = createBaseState({
+    it("restores resume messages and last output", () => {
+      const state = createBaseState({
         tasks: [
           createTask({
-            id: "T1",
             status: "stopped",
-            resumeMessage: "Please continue from where you left off",
+            resumeMessage: "Please continue from here",
+            lastOutput: "Working on implementation",
           }),
         ],
       });
-
-      const mockCtx = {
+      const ctx = {
         sessionManager: {
           getBranch: vi
             .fn()
-            .mockReturnValue([{ type: "custom", customType: STATE_TYPE, data: stateWithResume }]),
+            .mockReturnValue([{ type: "custom", customType: STATE_TYPE, data: state }]),
         },
       } as unknown as ExtensionContext;
-
-      const restored = restoreState(mockCtx);
-
-      expect(restored?.tasks[0].resumeMessage).toBe("Please continue from where you left off");
+      const restored = restoreState(ctx);
+      expect(restored?.tasks[0].resumeMessage).toBe("Please continue from here");
+      expect(restored?.tasks[0].lastOutput).toBe("Working on implementation");
     });
 
-    it("restores state with lastOutput", () => {
-      const stateWithOutput = createBaseState({
-        tasks: [
-          createTask({
-            id: "T1",
-            status: "in_progress",
-            lastOutput: "Working on implementation...",
-            lastActivityAt: Date.now(),
-          }),
-        ],
+    it("migrates active-only state to a status and supplies missing persisted metadata", () => {
+      const ctx = {
+        sessionManager: {
+          getBranch: vi.fn().mockReturnValue([
+            {
+              type: "custom",
+              customType: STATE_TYPE,
+              data: { runId: "run-1", workflowName: "default", goal: "g", active: true, tasks: [] },
+            },
+          ]),
+        },
+      } as unknown as ExtensionContext;
+      expect(restoreState(ctx)).toMatchObject({
+        status: "running",
+        active: true,
+        waveIndex: 0,
       });
+      expect(restoreState(ctx)?.updatedAt).toEqual(expect.any(Number));
+    });
 
-      const mockCtx = {
+    it("ignores malformed state entries", () => {
+      const ctx = {
         sessionManager: {
           getBranch: vi
             .fn()
-            .mockReturnValue([{ type: "custom", customType: STATE_TYPE, data: stateWithOutput }]),
+            .mockReturnValue([{ type: "custom", customType: STATE_TYPE, data: null }]),
         },
       } as unknown as ExtensionContext;
-
-      const restored = restoreState(mockCtx);
-
-      expect(restored?.tasks[0].lastOutput).toBe("Working on implementation...");
+      expect(restoreState(ctx)).toBeUndefined();
     });
   });
 
-  describe("STATE_TYPE constant", () => {
-    it("is exported as workflow-state", () => {
-      expect(STATE_TYPE).toBe("workflow-state");
-    });
+  it("exports the expected state entry type", () => {
+    expect(STATE_TYPE).toBe("workflow-state");
   });
 });

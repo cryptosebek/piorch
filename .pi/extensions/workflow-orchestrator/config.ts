@@ -1,22 +1,27 @@
 import * as fs from "node:fs";
-import { Type, type Static } from "@sinclair/typebox";
-import { Value } from "@sinclair/typebox/value";
-import { resolveWorkflowPath } from "./setup.js";
+import * as path from "node:path";
+import { Type, type Static } from "typebox";
+import { Check, Errors } from "typebox/value";
+import {
+  IdentifierSchema,
+  SemanticStageIdSchema,
+  WaveSchema,
+  validateGenerateWave,
+} from "./contracts.js";
 
 const TransitionSchema = Type.Object({
   when: Type.Object({
-    field: Type.String(),
-    equals: Type.String(),
+    field: Type.String({ minLength: 1 }),
+    equals: Type.String({ minLength: 1 }),
   }),
-  next: Type.String(),
+  next: Type.Union([IdentifierSchema, Type.Literal("complete")]),
 });
 
 const StageSchema = Type.Object({
-  id: Type.String(),
-  agent: Type.String(),
-  inputTemplate: Type.String(),
-  outputSchema: Type.Record(Type.String(), Type.String()),
-  transitions: Type.Optional(Type.Array(TransitionSchema)),
+  id: SemanticStageIdSchema,
+  agent: Type.String({ minLength: 1 }),
+  inputTemplate: Type.String({ minLength: 1 }),
+  transitions: Type.Optional(Type.Array(TransitionSchema, { maxItems: 20 })),
 });
 
 const TaskFlowMemorySchema = Type.Object({
@@ -31,57 +36,35 @@ const TaskFlowMemorySchema = Type.Object({
   ),
 });
 
-const TaskSchema = Type.Object({
-  id: Type.String(),
-  title: Type.String(),
-  description: Type.String(),
-  requirements: Type.Optional(Type.String()),
-  assignee: Type.Optional(Type.String()),
-});
-
-const WaveSchema = Type.Object({
-  goal: Type.String(),
-  tasks: Type.Array(TaskSchema),
-});
-
 const WaveSourceSchema = Type.Object({
   type: Type.Union([Type.Literal("pm"), Type.Literal("static")]),
-  staticWaves: Type.Optional(Type.Array(WaveSchema)),
+  staticWaves: Type.Optional(Type.Array(WaveSchema, { maxItems: 100 })),
 });
 
 const AllowedExtensionsByAgentSchema = Type.Record(Type.String(), Type.Array(Type.String()));
-
-const AgentsSchema = Type.Record(Type.String(), Type.String());
-
-const AgentRetrySchema = Type.Object({
-  maxAttempts: Type.Optional(Type.Number()),
-  initialDelayMs: Type.Optional(Type.Number()),
-  maxDelayMs: Type.Optional(Type.Number()),
-  backoffMultiplier: Type.Optional(Type.Number()),
-  jitterMs: Type.Optional(Type.Number()),
-});
+const AgentsSchema = Type.Record(IdentifierSchema, Type.String({ minLength: 1 }));
 
 const WorkflowSchema = Type.Object({
-  name: Type.String(),
-  goal: Type.String(),
-  maxWaves: Type.Optional(Type.Number()),
-  maxTaskRetries: Type.Optional(Type.Number()),
-  maxPmRetries: Type.Optional(Type.Number()),
-  parallelism: Type.Optional(Type.Number()),
-  agentRetry: Type.Optional(AgentRetrySchema),
+  name: IdentifierSchema,
+  goal: Type.String({ minLength: 1, maxLength: 4000 }),
+  piCommand: Type.Optional(Type.String({ minLength: 1, maxLength: 1000 })),
+  maxWaves: Type.Optional(Type.Integer({ minimum: 1 })),
+  maxTaskRetries: Type.Optional(Type.Integer({ minimum: 0 })),
+  maxPmRetries: Type.Optional(Type.Integer({ minimum: 1 })),
+  parallelism: Type.Optional(Type.Integer({ minimum: 1 })),
   allowedExtensions: Type.Optional(Type.Array(Type.String())),
   allowedExtensionsByAgent: Type.Optional(AllowedExtensionsByAgentSchema),
   agents: AgentsSchema,
   waveSource: WaveSourceSchema,
   taskFlow: Type.Object({
-    stages: Type.Array(StageSchema),
+    stages: Type.Array(StageSchema, { minItems: 2, maxItems: 2 }),
     memory: Type.Optional(TaskFlowMemorySchema),
   }),
 });
 
 export type WorkflowConfig = Static<typeof WorkflowSchema>;
 export type WorkflowStage = Static<typeof StageSchema>;
-export type WorkflowTask = Static<typeof TaskSchema>;
+export type WorkflowTask = Static<typeof WaveSchema>["tasks"][number];
 export type WorkflowWave = Static<typeof WaveSchema>;
 
 export interface LoadedWorkflow {
@@ -89,28 +72,75 @@ export interface LoadedWorkflow {
   path: string;
 }
 
-function sanitizeWorkflowName(name: string): string {
-  if (!name || typeof name !== "string") {
-    throw new Error("Workflow name is required");
+function assertPositiveInteger(name: string, value: number, allowZero = false): void {
+  const minimum = allowZero ? 0 : 1;
+  if (!Number.isInteger(value) || value < minimum) {
+    throw new Error(`${name} must be a ${allowZero ? "non-negative" : "positive"} integer`);
+  }
+}
+
+function validateCrossFields(config: WorkflowConfig): void {
+  const requiredRoles = ["pm", "developer", "verifier"] as const;
+  for (const role of requiredRoles) {
+    const agentName = config.agents[role];
+    if (typeof agentName !== "string" || !agentName.trim()) {
+      throw new Error(`agents.${role} must resolve to a non-empty agent name`);
+    }
   }
 
-  // Only allow alphanumeric, dash, underscore
-  if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+  const stageIds = new Set(config.taskFlow.stages.map((stage) => stage.id));
+  if (!stageIds.has("develop") || !stageIds.has("verify") || stageIds.size !== 2) {
     throw new Error(
-      `Invalid workflow name: ${name}. Only alphanumeric, dash, and underscore allowed.`,
+      'taskFlow.stages must contain exactly the semantic stages "develop" and "verify"',
     );
   }
 
-  if (name.length > 50) {
-    throw new Error("Workflow name too long (max 50 characters)");
+  const configuredAgentNames = new Set(Object.values(config.agents));
+  for (const stage of config.taskFlow.stages) {
+    if (!configuredAgentNames.has(stage.agent)) {
+      throw new Error(`Stage ${stage.id} references unknown agent: ${stage.agent}`);
+    }
+    for (const transition of stage.transitions ?? []) {
+      if (
+        transition.next !== "complete" &&
+        !stageIds.has(transition.next as "develop" | "verify")
+      ) {
+        throw new Error(`Stage ${stage.id} transition targets unknown stage: ${transition.next}`);
+      }
+    }
   }
 
-  return name;
+  if (config.waveSource.type === "static") {
+    for (const [index, wave] of (config.waveSource.staticWaves ?? []).entries()) {
+      try {
+        validateGenerateWave({ done: false, wave });
+      } catch (error) {
+        throw new Error(`waveSource.staticWaves[${index}] is invalid: ${(error as Error).message}`);
+      }
+    }
+  }
+
+  assertPositiveInteger("maxWaves", config.maxWaves!);
+  assertPositiveInteger("maxTaskRetries", config.maxTaskRetries!, true);
+  assertPositiveInteger("maxPmRetries", config.maxPmRetries!);
+  assertPositiveInteger("parallelism", config.parallelism!);
 }
 
 export function loadWorkflowConfig(cwd: string, name: string): LoadedWorkflow {
-  const safeName = sanitizeWorkflowName(name);
-  const workflowPath = resolveWorkflowPath(cwd, safeName);
+  if (typeof name !== "string" || !name.trim()) {
+    throw new Error("Workflow name is required");
+  }
+  if (name.length > 64) {
+    throw new Error("Workflow name too long (max 64 characters)");
+  }
+  if (!Check(IdentifierSchema, name)) {
+    throw new Error(`Invalid workflow name: ${name}. Expected 1-64 safe identifier characters.`);
+  }
+
+  const workflowPath = path.join(cwd, ".pi", "workflows", `${name}.workflow.json`);
+  if (!fs.existsSync(workflowPath)) {
+    throw new Error(`Workflow not found: ${workflowPath}`);
+  }
 
   const raw = fs.readFileSync(workflowPath, "utf-8");
   let parsed: unknown;
@@ -120,25 +150,25 @@ export function loadWorkflowConfig(cwd: string, name: string): LoadedWorkflow {
     throw new Error(`Invalid JSON in workflow file: ${workflowPath}`);
   }
 
-  if (!Value.Check(WorkflowSchema, parsed)) {
-    const errors = [...Value.Errors(WorkflowSchema, parsed)].map(
-      (err) => `${err.path} ${err.message}`,
+  if (parsed && typeof parsed === "object" && "agentRetry" in parsed) {
+    throw new Error(
+      "Unsupported workflow configuration: agentRetry was removed. Configure Pi retry.enabled, retry.maxRetries, and retry.baseDelayMs in Pi settings instead.",
+    );
+  }
+
+  if (!Check(WorkflowSchema, parsed)) {
+    const errors = [...Errors(WorkflowSchema, parsed)].map(
+      (error) => `${"path" in error && error.path ? error.path : "value"} ${error.message}`,
     );
     throw new Error(`Workflow schema validation failed:\n${errors.join("\n")}`);
   }
 
   const config = parsed as WorkflowConfig;
-
-  // Apply defaults
+  config.piCommand = config.piCommand ?? "pi";
   config.maxWaves = config.maxWaves ?? 10;
   config.maxTaskRetries = config.maxTaskRetries ?? 2;
+  config.maxPmRetries = config.maxPmRetries ?? 3;
   config.parallelism = config.parallelism ?? 1;
-  config.agentRetry = config.agentRetry ?? {};
-  config.agentRetry.maxAttempts = config.agentRetry.maxAttempts ?? 5;
-  config.agentRetry.initialDelayMs = config.agentRetry.initialDelayMs ?? 5000;
-  config.agentRetry.maxDelayMs = config.agentRetry.maxDelayMs ?? 120000;
-  config.agentRetry.backoffMultiplier = config.agentRetry.backoffMultiplier ?? 2;
-  config.agentRetry.jitterMs = config.agentRetry.jitterMs ?? 1000;
   config.taskFlow.memory = config.taskFlow.memory ?? {};
   config.taskFlow.memory.keepDeveloperMemory = config.taskFlow.memory.keepDeveloperMemory ?? true;
   config.taskFlow.memory.keepVerifierMemoryOnDeveloperFailure =
@@ -146,24 +176,6 @@ export function loadWorkflowConfig(cwd: string, name: string): LoadedWorkflow {
   config.taskFlow.memory.verifierSelfFailureMemory =
     config.taskFlow.memory.verifierSelfFailureMemory ?? "keep";
 
-  if (config.parallelism < 1) {
-    throw new Error("parallelism must be at least 1");
-  }
-  if (config.agentRetry.maxAttempts < 1) {
-    throw new Error("agentRetry.maxAttempts must be at least 1");
-  }
-  if (config.agentRetry.initialDelayMs < 0) {
-    throw new Error("agentRetry.initialDelayMs must be at least 0");
-  }
-  if (config.agentRetry.maxDelayMs < 0) {
-    throw new Error("agentRetry.maxDelayMs must be at least 0");
-  }
-  if (config.agentRetry.backoffMultiplier < 1) {
-    throw new Error("agentRetry.backoffMultiplier must be at least 1");
-  }
-  if (config.agentRetry.jitterMs < 0) {
-    throw new Error("agentRetry.jitterMs must be at least 0");
-  }
-
+  validateCrossFields(config);
   return { config, path: workflowPath };
 }

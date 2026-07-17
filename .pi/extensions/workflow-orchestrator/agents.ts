@@ -1,9 +1,30 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
-import { getAgentDir, parseFrontmatter } from "@mariozechner/pi-coding-agent";
-import { getPackagePiRoot } from "./setup.js";
 
-export type AgentSource = "user" | "project" | "package";
+function getAgentDir(): string {
+  return process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
+}
+
+function parseFrontmatter<T extends Record<string, unknown>>(
+  content: string,
+): { frontmatter: T; body: string } {
+  const normalized = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  if (!normalized.startsWith("---")) return { frontmatter: {} as T, body: normalized };
+  const end = normalized.indexOf("\n---", 3);
+  if (end < 0) return { frontmatter: {} as T, body: normalized };
+  const frontmatter: Record<string, unknown> = {};
+  for (const line of normalized.slice(4, end).split("\n")) {
+    const separator = line.indexOf(":");
+    if (separator < 0) continue;
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim();
+    if (key) frontmatter[key] = value;
+  }
+  return { frontmatter: frontmatter as T, body: normalized.slice(end + 4).trim() };
+}
+
+export type AgentSource = "user" | "project";
 
 export interface AgentConfig {
   name: string;
@@ -90,12 +111,8 @@ export function discoverAgents(cwd: string): AgentDiscoveryResult {
   const projectAgentsDir = findNearestProjectAgentsDir(cwd);
   const userAgents = loadAgentsFromDir(userDir, "user");
   const projectAgents = projectAgentsDir ? loadAgentsFromDir(projectAgentsDir, "project") : [];
-  const packageAgents = projectAgentsDir
-    ? []
-    : loadAgentsFromDir(path.join(getPackagePiRoot(), "agents"), "package");
 
   const agentMap = new Map<string, AgentConfig>();
-  for (const agent of packageAgents) agentMap.set(agent.name, agent);
   for (const agent of userAgents) agentMap.set(agent.name, agent);
   for (const agent of projectAgents) agentMap.set(agent.name, agent);
 

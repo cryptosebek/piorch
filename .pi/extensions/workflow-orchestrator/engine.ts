@@ -102,7 +102,11 @@ export async function runTaskFlow<TTask extends { retries: number }, TOutput>(
     const firstStageId = input.startStageId ?? input.stages[0]?.id;
     let matchedTransition = false;
     if (stage.transitions && stage.transitions.length > 0) {
-      const fieldTarget = (output as any)?.output ?? output;
+      const fieldTarget =
+        (output as any)?.output?.report ??
+        (output as any)?.report ??
+        (output as any)?.output ??
+        output;
       for (const transition of stage.transitions) {
         const fieldValue = getField(fieldTarget as any, transition.when.field);
         if (String(fieldValue) === transition.when.equals) {

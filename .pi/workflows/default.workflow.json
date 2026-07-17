@@ -5,13 +5,6 @@
   "maxTaskRetries": 6,
   "maxPmRetries": 3,
   "parallelism": 4,
-  "agentRetry": {
-    "maxAttempts": 5,
-    "initialDelayMs": 5000,
-    "maxDelayMs": 120000,
-    "backoffMultiplier": 2,
-    "jitterMs": 1000
-  },
   "allowedExtensionsByAgent": {
     "pm": ["./.pi/extensions/workflow-pm-tools/index.ts"],
     "developer": ["./.pi/extensions/workflow-task-tools/index.ts"],
@@ -35,22 +28,12 @@
       {
         "id": "develop",
         "agent": "developer",
-        "inputTemplate": "Project goal: {{workflow.goal}}\nTask: {{task.title}}\n{{task.description}}\nIssues: {{task.issues}}",
-        "outputSchema": {
-          "status": "done",
-          "summary": "string",
-          "filesChanged": "string[]",
-          "notes": "string"
-        }
+        "inputTemplate": "Project goal: {{workflow.goal}}\nTask: {{task.title}}\n{{task.description}}\nIssues: {{task.issues}}"
       },
       {
         "id": "verify",
         "agent": "verifier",
-        "inputTemplate": "Project goal: {{workflow.goal}}\nVerify task {{task.title}}.\nDescription: {{task.description}}\nRequirements: {{task.requirements}}\nDev summary: {{task.stageOutputs.develop.summary}}",
-        "outputSchema": {
-          "status": "pass|fail",
-          "issues": "string[]"
-        },
+        "inputTemplate": "Project goal: {{workflow.goal}}\nVerify task {{task.title}}.\nDescription: {{task.description}}\nRequirements: {{task.requirements}}\nDev summary: {{task.stageOutputs.develop.report.summary}}\nDev files: {{task.stageOutputs.develop.report.filesChanged}}",
         "transitions": [
           { "when": { "field": "status", "equals": "fail" }, "next": "develop" },
           { "when": { "field": "status", "equals": "pass" }, "next": "complete" }

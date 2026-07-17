@@ -12,6 +12,8 @@ Customizable PM → Dev → Verifier workflow for **pi** using an extension and 
 - PM chat in the main pi conversation
 - Per‑agent model selection
 - Persistent workflow state in the session
+- Typed structured reports with evidence and issue validation
+- Pi 0.80.10 runtime preflight and correlated RPC handling
 
 ## Repository Layout
 
@@ -155,9 +157,9 @@ Edit `.pi/workflows/default.workflow.json` to customize:
 - **agent names** - Which agent files to use (pm, developer, verifier)
 - **stages and transitions** - Customize the dev/verify loop
 - **wave source** - PM-driven or static task waves
-- **parallelism** - How many tasks to run concurrently (default: 4)
+- **parallelism** - How many tasks to run concurrently (default: 1)
 - **maxWaves** - Maximum number of waves (default: 10)
-- **maxTaskRetries** - Retry limit per task (default: 6)
+- **maxTaskRetries** - Retry limit per task (default: 2)
 - **maxPmRetries** - Retry limit for PM wave generation (default: 3)
 - **allowedExtensions** - Whitelist extensions for all subagents
 - **allowedExtensionsByAgent** - Per-agent extension allowlists
@@ -167,6 +169,11 @@ Edit `.pi/workflows/default.workflow.json` to customize:
   - `keep` (default)
   - `reset`
   - `reset_on_malformed_output`
+
+The workflow configuration intentionally has no `agentRetry` field. Pi owns
+provider retry behavior through `retry.enabled`, `retry.maxRetries`, and
+`retry.baseDelayMs` in Pi settings. `maxTaskRetries` and `maxPmRetries` remain
+workflow-level semantic retries.
 
 Example:
 
@@ -197,7 +204,7 @@ Edit `.pi/agents/*.md` to customize agent behavior:
 name: developer
 description: Implements assigned tasks
 model: anthropic/claude-sonnet-4-5 # Your preferred model (or remove to use Pi default)
-tools: read,edit,write,bash # Built-in tools to enable
+tools: read,edit,write,bash,report_task_result # Built-in and role tools to enable
 ---
 ```
 

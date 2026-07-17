@@ -1,586 +1,240 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import workflowTaskTools from "../.pi/extensions/workflow-task-tools/index.js";
 
 describe("workflow-task-tools extension", () => {
   let mockPi: ExtensionAPI;
   let registeredTool: any;
 
-  beforeEach(() => {
-    registeredTool = null;
+  const developerReport = {
+    status: "done",
+    summary: "Implemented the feature",
+    filesChanged: ["src/feature.ts"],
+    evidence: [{ kind: "test", description: "Unit tests pass", outcome: "pass" }],
+    issues: [],
+  };
 
+  const verifierReport = {
+    status: "pass",
+    summary: "Verified the feature",
+    evidence: [{ kind: "test", description: "Acceptance tests pass", outcome: "pass" }],
+    issues: [],
+  };
+
+  beforeEach(() => {
+    registeredTool = undefined;
     mockPi = {
-      registerTool: vi.fn((toolDef) => {
-        registeredTool = toolDef;
+      registerTool: vi.fn((definition) => {
+        registeredTool = definition;
       }),
       sendMessage: vi.fn(),
       appendEntry: vi.fn(),
     } as unknown as ExtensionAPI;
+    workflowTaskTools(mockPi);
   });
 
-  describe("extension initialization", () => {
-    it("registers report_task_result tool", () => {
-      workflowTaskTools(mockPi);
-
-      expect(mockPi.registerTool).toHaveBeenCalled();
-      expect(registeredTool).toBeDefined();
-    });
-
-    it("report_task_result tool has correct metadata", () => {
-      workflowTaskTools(mockPi);
-
-      expect(registeredTool.name).toBe("report_task_result");
-      expect(registeredTool.label).toBe("Report Task Result");
-      expect(registeredTool.description).toContain("developer/verifier");
-    });
-
-    it("report_task_result tool has parameters schema", () => {
-      workflowTaskTools(mockPi);
-
-      expect(registeredTool.parameters).toBeDefined();
-      expect(typeof registeredTool.parameters).toBe("object");
-    });
+  it("registers the shared report tool and schema", () => {
+    expect(mockPi.registerTool).toHaveBeenCalled();
+    expect(registeredTool.name).toBe("report_task_result");
+    expect(registeredTool.description).toContain("developer/verifier");
+    expect(registeredTool.parameters).toBeDefined();
   });
 
-  describe("report_task_result tool execute - developer status", () => {
-    it("returns success for status=done with summary", async () => {
-      workflowTaskTools(mockPi);
-
-      const result = await registeredTool.execute(
-        "tool-call-123",
-        { status: "done", summary: "Implemented feature" },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      expect(result.content[0].text).toContain("Task completed");
-      expect(result.content[0].text).toContain("Implemented feature");
-    });
-
-    it("handles done with filesChanged", async () => {
-      workflowTaskTools(mockPi);
-
-      const result = await registeredTool.execute(
-        "tool-call-123",
-        {
-          status: "done",
-          summary: "Created config module",
-          filesChanged: ["src/config.ts", "src/config.test.ts"],
-        },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      expect(result.content[0].text).toContain("src/config.ts");
-      expect(result.content[0].text).toContain("src/config.test.ts");
-    });
-
-    it("handles done with empty filesChanged", async () => {
-      workflowTaskTools(mockPi);
-
-      const result = await registeredTool.execute(
-        "tool-call-123",
-        {
-          status: "done",
-          summary: "Refactored code",
-          filesChanged: [],
-        },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      expect(result.content[0].text).toContain("Files: none");
-    });
-
-    it("handles done without filesChanged", async () => {
-      workflowTaskTools(mockPi);
-
-      const result = await registeredTool.execute(
-        "tool-call-123",
-        {
-          status: "done",
-          summary: "Updated documentation",
-        },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      expect(result.content[0].text).toContain("Files: none");
-    });
-
-    it("handles done with notes", async () => {
-      workflowTaskTools(mockPi);
-
-      const result = await registeredTool.execute(
-        "tool-call-123",
-        {
-          status: "done",
-          summary: "Added tests",
-          notes: "Used vitest framework",
-        },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      // Notes are included in details but not in the summary message
-      expect(result.content[0].text).toContain("Task completed");
-      expect(result.details.params.notes).toBe("Used vitest framework");
-    });
-
-    it("handles done with all fields", async () => {
-      workflowTaskTools(mockPi);
-
-      const params = {
-        status: "done" as const,
-        summary: "Complete implementation",
-        filesChanged: ["src/index.ts", "src/utils.ts"],
-        notes: "Ready for review",
-      };
-
-      const result = await registeredTool.execute(
-        "tool-call-123",
-        params,
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      expect(result.content[0].text).toContain("Complete implementation");
-      expect(result.content[0].text).toContain("src/index.ts");
-      expect(result.details.params).toEqual(params);
-    });
+  it("accepts a complete developer report", async () => {
+    const result = await registeredTool.execute(
+      "call",
+      developerReport,
+      vi.fn(),
+      {},
+      new AbortController().signal,
+    );
+    expect(result.content[0].text).toContain("Task completed");
+    expect(result.content[0].text).toContain("src/feature.ts");
+    expect(result.details.params).toEqual(developerReport);
   });
 
-  describe("report_task_result tool execute - verifier status=pass", () => {
-    it("returns success for status=pass", async () => {
-      workflowTaskTools(mockPi);
-
-      const result = await registeredTool.execute(
-        "tool-call-123",
-        { status: "pass", issues: [] },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      expect(result.content[0].text).toBe("Verification passed. No issues found.");
-    });
-
-    it("handles pass with empty issues", async () => {
-      workflowTaskTools(mockPi);
-
-      const result = await registeredTool.execute(
-        "tool-call-123",
-        { status: "pass", issues: [] },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      expect(result.content[0].text).toContain("No issues found");
-    });
-
-    it("ignores issues array when status is pass", async () => {
-      workflowTaskTools(mockPi);
-
-      // If someone mistakenly provides issues with pass status
-      const result = await registeredTool.execute(
-        "tool-call-123",
-        { status: "pass", issues: ["should be ignored"] },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      // The message still says passed
-      expect(result.content[0].text).toBe("Verification passed. No issues found.");
-    });
+  it("accepts a partial developer report only with a blocking issue", async () => {
+    const params = {
+      ...developerReport,
+      status: "partial",
+      issues: [{ severity: "blocking", description: "The implementation is incomplete" }],
+    };
+    const result = await registeredTool.execute(
+      "call",
+      params,
+      vi.fn(),
+      {},
+      new AbortController().signal,
+    );
+    expect(result.content[0].text).toContain("partially");
   });
 
-  describe("report_task_result tool execute - verifier status=fail", () => {
-    it("returns failure message with issues", async () => {
-      workflowTaskTools(mockPi);
+  it("rejects developer reports with verifier statuses", async () => {
+    await expect(
+      registeredTool.execute(
+        "call",
+        { ...developerReport, status: "pass" },
+        vi.fn(),
+        {},
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow("developer reports");
+  });
 
-      const result = await registeredTool.execute(
-        "tool-call-123",
+  it("rejects incomplete developer reports", async () => {
+    await expect(
+      registeredTool.execute(
+        "call",
+        { status: "done", summary: "Missing fields" },
+        vi.fn(),
+        {},
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow("Developer report validation");
+  });
+
+  it("rejects unsafe developer file paths", async () => {
+    for (const filesChanged of [["/absolute.ts"], ["../escape.ts"], ["src/../escape.ts"]]) {
+      await expect(
+        registeredTool.execute(
+          "call",
+          { ...developerReport, filesChanged },
+          vi.fn(),
+          {},
+          new AbortController().signal,
+        ),
+      ).rejects.toThrow("relative and safe");
+    }
+  });
+
+  it("accepts a passing verifier report with passing evidence", async () => {
+    const result = await registeredTool.execute(
+      "call",
+      verifierReport,
+      vi.fn(),
+      {},
+      new AbortController().signal,
+    );
+    expect(result.content[0].text).toContain("Verification passed");
+    expect(result.details.params).toEqual(verifierReport);
+  });
+
+  it("rejects verifier pass without passing evidence", async () => {
+    await expect(
+      registeredTool.execute(
+        "call",
+        { ...verifierReport, evidence: [] },
+        vi.fn(),
+        {},
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow("passing evidence");
+  });
+
+  it("rejects verifier pass with a failed evidence item or blocking issue", async () => {
+    for (const params of [
+      { ...verifierReport, evidence: [{ kind: "test", description: "Failed", outcome: "fail" }] },
+      {
+        ...verifierReport,
+        issues: [{ severity: "blocking", description: "Blocked" }],
+      },
+    ]) {
+      await expect(
+        registeredTool.execute("call", params, vi.fn(), {}, new AbortController().signal),
+      ).rejects.toThrow();
+    }
+  });
+
+  it("accepts verifier fail only with an actionable blocking issue", async () => {
+    const params = {
+      status: "fail",
+      summary: "Verification found a defect",
+      evidence: [{ kind: "test", description: "Acceptance test fails", outcome: "fail" }],
+      issues: [{ severity: "blocking", description: "The feature does not satisfy requirement" }],
+    };
+    const result = await registeredTool.execute(
+      "call",
+      params,
+      vi.fn(),
+      {},
+      new AbortController().signal,
+    );
+    expect(result.content[0].text).toContain("Verification failed");
+    expect(result.content[0].text).toContain("does not satisfy");
+  });
+
+  it("rejects verifier fail without a blocking issue", async () => {
+    await expect(
+      registeredTool.execute(
+        "call",
         {
           status: "fail",
-          issues: ["File not found", "Tests failing"],
-        },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      expect(result.content[0].text).toContain("Verification failed");
-      expect(result.content[0].text).toContain("- File not found");
-      expect(result.content[0].text).toContain("- Tests failing");
-    });
-
-    it("handles single issue", async () => {
-      workflowTaskTools(mockPi);
-
-      const result = await registeredTool.execute(
-        "tool-call-123",
-        {
-          status: "fail",
-          issues: ["Missing export statement"],
-        },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      expect(result.content[0].text).toContain("- Missing export statement");
-    });
-
-    it("handles empty issues array", async () => {
-      workflowTaskTools(mockPi);
-
-      const result = await registeredTool.execute(
-        "tool-call-123",
-        {
-          status: "fail",
+          summary: "Failure",
+          evidence: [{ kind: "test", description: "Failed", outcome: "fail" }],
           issues: [],
         },
         vi.fn(),
-        {} as any,
+        {},
         new AbortController().signal,
-      );
-
-      expect(result.content[0].text).toContain("Verification failed");
-      expect(result.content[0].text).not.toContain("- ");
-    });
-
-    it("handles multiple issues with formatting", async () => {
-      workflowTaskTools(mockPi);
-
-      const result = await registeredTool.execute(
-        "tool-call-123",
-        {
-          status: "fail",
-          issues: ["Issue 1", "Issue 2", "Issue 3"],
-        },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      const text = result.content[0].text;
-      expect(text).toContain("- Issue 1");
-      expect(text).toContain("- Issue 2");
-      expect(text).toContain("- Issue 3");
-    });
+      ),
+    ).rejects.toThrow("blocking issue");
   });
 
-  describe("report_task_result tool execute - edge cases", () => {
-    it("handles undefined optional fields", async () => {
-      workflowTaskTools(mockPi);
-
-      const result = await registeredTool.execute(
-        "tool-call-123",
-        { status: "done" },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      expect(result.content[0].text).toContain("Summary: N/A");
-      expect(result.content[0].text).toContain("Files: none");
-    });
-
-    it("handles null-like values", async () => {
-      workflowTaskTools(mockPi);
-
-      const result = await registeredTool.execute(
-        "tool-call-123",
-        { status: "done", summary: "", filesChanged: null as any },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      // Empty string summary
-      expect(result.content[0].text).toContain("Summary: ");
-    });
-
-    it("handles special characters in summary", async () => {
-      workflowTaskTools(mockPi);
-
-      const result = await registeredTool.execute(
-        "tool-call-123",
-        {
-          status: "done",
-          summary: 'Created file with\nnewlines and "quotes"',
-        },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      expect(result.content[0].text).toContain("newlines");
-      expect(result.content[0].text).toContain("quotes");
-    });
-
-    it("handles special characters in issues", async () => {
-      workflowTaskTools(mockPi);
-
-      const result = await registeredTool.execute(
-        "tool-call-123",
-        {
-          status: "fail",
-          issues: ['Error: "Module not found"', "Line 42: Unexpected token"],
-        },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      expect(result.content[0].text).toContain('"Module not found"');
-      expect(result.content[0].text).toContain("Unexpected token");
-    });
-
-    it("handles long file paths", async () => {
-      workflowTaskTools(mockPi);
-
-      const result = await registeredTool.execute(
-        "tool-call-123",
-        {
-          status: "done",
-          summary: "Refactored",
-          filesChanged: [
-            "src/very/long/path/to/some/deeply/nested/module/file.ts",
-            "tests/very/long/path/to/some/deeply/nested/module/file.test.ts",
-          ],
-        },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      expect(result.content[0].text).toContain("src/very/long");
-    });
+  it("accepts an environmental verifier partial report", async () => {
+    const params = {
+      status: "partial",
+      summary: "Verification is blocked by the environment",
+      evidence: [{ kind: "manual", description: "Environment unavailable", outcome: "blocked" }],
+      issues: [{ severity: "blocking", description: "Required environment is unavailable" }],
+    };
+    const result = await registeredTool.execute(
+      "call",
+      params,
+      vi.fn(),
+      {},
+      new AbortController().signal,
+    );
+    expect(result.content[0].text).toContain("partially");
   });
 
-  describe("tool behavior", () => {
-    it("does not call sendMessage", async () => {
-      workflowTaskTools(mockPi);
-
-      await registeredTool.execute(
-        "tool-call-123",
-        { status: "done", summary: "Test" },
+  it("rejects verifier partial without blocked evidence", async () => {
+    await expect(
+      registeredTool.execute(
+        "call",
+        {
+          status: "partial",
+          summary: "Blocked",
+          evidence: [{ kind: "test", description: "No run", outcome: "pass" }],
+          issues: [{ severity: "blocking", description: "Environment unavailable" }],
+        },
         vi.fn(),
-        {} as any,
+        {},
         new AbortController().signal,
-      );
-
-      expect(mockPi.sendMessage).not.toHaveBeenCalled();
-    });
-
-    it("does not call appendEntry", async () => {
-      workflowTaskTools(mockPi);
-
-      await registeredTool.execute(
-        "tool-call-123",
-        { status: "done", summary: "Test" },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      expect(mockPi.appendEntry).not.toHaveBeenCalled();
-    });
-
-    it("returns consistent response structure", async () => {
-      workflowTaskTools(mockPi);
-
-      const doneResult = await registeredTool.execute(
-        "id1",
-        { status: "done", summary: "Test" },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      const passResult = await registeredTool.execute(
-        "id2",
-        { status: "pass", issues: [] },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      const failResult = await registeredTool.execute(
-        "id3",
-        { status: "fail", issues: ["Bug"] },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      // All should have content and details
-      expect(doneResult).toHaveProperty("content");
-      expect(doneResult).toHaveProperty("details");
-      expect(passResult).toHaveProperty("content");
-      expect(passResult).toHaveProperty("details");
-      expect(failResult).toHaveProperty("content");
-      expect(failResult).toHaveProperty("details");
-    });
-
-    it("includes params in details", async () => {
-      workflowTaskTools(mockPi);
-
-      const params = { status: "done", summary: "Test", filesChanged: ["a.ts"] };
-
-      const result = await registeredTool.execute(
-        "tool-call-123",
-        params,
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      expect(result.details.params).toEqual(params);
-    });
+      ),
+    ).rejects.toThrow("blocked evidence");
   });
 
-  describe("tool parameter schema", () => {
-    it("status accepts done, pass, or fail", () => {
-      workflowTaskTools(mockPi);
-
-      // Schema uses Type.Union with literals
-      expect(registeredTool.parameters).toBeDefined();
-
-      // The schema structure is TypeBox
-      const schema = registeredTool.parameters;
-      expect(schema).toHaveProperty("type");
-    });
-
-    it("summary is optional", async () => {
-      workflowTaskTools(mockPi);
-
-      const result = await registeredTool.execute(
-        "id",
-        { status: "done" },
+  it("rejects verifier reports containing developer-only filesChanged", async () => {
+    await expect(
+      registeredTool.execute(
+        "call",
+        { ...verifierReport, filesChanged: ["src/feature.ts"] },
         vi.fn(),
-        {} as any,
+        {},
         new AbortController().signal,
-      );
-
-      // Should not throw, summary is optional
-      expect(result.content[0].text).toContain("N/A");
-    });
-
-    it("filesChanged is optional", async () => {
-      workflowTaskTools(mockPi);
-
-      const result = await registeredTool.execute(
-        "id",
-        { status: "done", summary: "Test" },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      // Should not throw
-      expect(result).toBeDefined();
-    });
-
-    it("notes is optional", async () => {
-      workflowTaskTools(mockPi);
-
-      const result = await registeredTool.execute(
-        "id",
-        { status: "done", summary: "Test" },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      // Should not throw
-      expect(result.details.params.notes).toBeUndefined();
-    });
-
-    it("issues is optional", async () => {
-      workflowTaskTools(mockPi);
-
-      const result = await registeredTool.execute(
-        "id",
-        { status: "pass" },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      // Should not throw
-      expect(result).toBeDefined();
-    });
+      ),
+    ).rejects.toThrow();
   });
 
-  describe("usage scenarios", () => {
-    it("developer completes task", async () => {
-      workflowTaskTools(mockPi);
-
-      const result = await registeredTool.execute(
-        "dev-123",
-        {
-          status: "done",
-          summary: "Implemented user authentication",
-          filesChanged: ["src/auth.ts", "src/middleware.ts"],
-          notes: "Uses JWT for tokens",
-        },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      expect(result.content[0].text).toContain("Implemented user authentication");
-      expect(result.content[0].text).toContain("src/auth.ts");
-    });
-
-    it("verifier passes task", async () => {
-      workflowTaskTools(mockPi);
-
-      const result = await registeredTool.execute(
-        "verifier-123",
-        {
-          status: "pass",
-          issues: [],
-        },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      expect(result.content[0].text).toBe("Verification passed. No issues found.");
-    });
-
-    it("verifier fails task with multiple issues", async () => {
-      workflowTaskTools(mockPi);
-
-      const result = await registeredTool.execute(
-        "verifier-123",
-        {
-          status: "fail",
-          issues: [
-            "Missing error handling in auth.ts",
-            "No tests for edge cases",
-            "TypeScript errors in middleware.ts",
-          ],
-        },
-        vi.fn(),
-        {} as any,
-        new AbortController().signal,
-      );
-
-      expect(result.content[0].text).toContain("Verification failed");
-      expect(result.content[0].text).toContain("Missing error handling");
-      expect(result.content[0].text).toContain("No tests for edge cases");
-    });
+  it("returns no side effects beyond the tool result", async () => {
+    await registeredTool.execute(
+      "call",
+      developerReport,
+      vi.fn(),
+      {},
+      new AbortController().signal,
+    );
+    expect(mockPi.sendMessage).not.toHaveBeenCalled();
+    expect(mockPi.appendEntry).not.toHaveBeenCalled();
   });
 });
