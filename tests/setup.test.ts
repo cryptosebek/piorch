@@ -27,6 +27,7 @@ describe("setup.ts", () => {
     const workflowPath = resolveWorkflowPath(cwd, "default");
 
     expect(workflowPath).toBe(path.join(getPackagePiRoot(), "workflows", "default.workflow.json"));
+    materializeProjectDefaults(cwd);
     expect(loadWorkflowConfig(cwd, "default").config.name).toBe("default");
 
     fs.rmSync(cwd, { recursive: true, force: true });
@@ -42,9 +43,27 @@ describe("setup.ts", () => {
         name: "default",
         goal: "project override",
         agents: { pm: "pm", developer: "developer", verifier: "verifier" },
-        waveSource: { type: "static", staticWaves: [{ goal: "g", tasks: [] }] },
+        waveSource: {
+          type: "static",
+          staticWaves: [
+            {
+              goal: "g",
+              tasks: [
+                {
+                  id: "T1",
+                  title: "Task",
+                  description: "Complete the task",
+                  requirements: "The task is complete",
+                },
+              ],
+            },
+          ],
+        },
         taskFlow: {
-          stages: [{ id: "develop", agent: "developer", inputTemplate: "x", outputSchema: {} }],
+          stages: [
+            { id: "develop", agent: "developer", inputTemplate: "x" },
+            { id: "verify", agent: "verifier", inputTemplate: "x" },
+          ],
         },
       }),
       "utf-8",

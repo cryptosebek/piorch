@@ -251,8 +251,7 @@ Prompt.
     it("handles non-existent directory", () => {
       const result = discoverAgents("/non/existent/path");
 
-      expect(result.agents.length).toBeGreaterThan(0);
-      expect(result.agents.every((agent) => agent.source === "project")).toBe(true);
+      expect(result.agents).toHaveLength(0);
       expect(result.projectAgentsDir).toBeNull();
     });
 
