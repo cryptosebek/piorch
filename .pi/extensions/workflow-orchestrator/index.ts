@@ -1490,7 +1490,6 @@ export default function (pi: ExtensionAPI) {
       const tokens = tokenizeWorkflowArgs(args || "");
       const command = tokens[0];
       const name = tokens[1];
-      const goalText = normalizeGoal(tokens.slice(2).join(" "));
 
       if (!command || command === "help") {
         sendWorkflowNotice(
