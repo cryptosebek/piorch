@@ -15,10 +15,10 @@ pi
 Then:
 
 ```
-/workflow "Your goal"
+/workflow start default "Your goal"
 ```
 
-First `/workflow` run copies editable agent and workflow files into `.pi/`. Edit them to customize, then `/reload`.
+The first start or resume copies missing workflow and agent defaults into `.pi/` without overwriting project files. Reporting extensions use project files when present and otherwise resolve from the installed package.
 
 Reload extensions:
 

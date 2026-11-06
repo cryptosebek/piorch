@@ -37,7 +37,6 @@ export interface WorkflowState {
   waveSummaries?: string[];
   waitingForClarification?: boolean;
   clarificationToken?: string;
-  model?: string;
 }
 
 export const STATE_TYPE = "workflow-state";

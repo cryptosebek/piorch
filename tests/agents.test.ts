@@ -251,8 +251,7 @@ Prompt.
     it("handles non-existent directory", () => {
       const result = discoverAgents("/non/existent/path");
 
-      expect(result.agents.length).toBeGreaterThan(0);
-      expect(result.agents.every((agent) => agent.source === "package")).toBe(true);
+      expect(result.agents).toHaveLength(0);
       expect(result.projectAgentsDir).toBeNull();
     });
 
@@ -274,7 +273,7 @@ Prompt.
         `---
 name: pm
 description: PM with model
-model: openrouter/free
+model: openrouter/stepfun/step-3.5-flash:free
 ---
 
 Prompt.
@@ -283,7 +282,7 @@ Prompt.
 
       const result = discoverAgents(tempDir);
 
-      expect(result.agents[0].model).toBe("openrouter/free");
+      expect(result.agents[0].model).toBe("openrouter/stepfun/step-3.5-flash:free");
     });
   });
 

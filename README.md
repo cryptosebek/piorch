@@ -45,11 +45,11 @@ Customizable PM → Dev → Verifier workflow for **pi** using an extension and 
 pi install git:github.com/hlibr/piorch
 ```
 
-This installs the extension and bundled defaults. On first run, editable workflow and agent files are copied into your project's `.pi/` directory.
+On the first `/workflow start` or `/workflow resume`, missing workflow and agent defaults are copied into your project's `.pi/` directory. Existing files are kept. Reporting-tool extensions are loaded from the installed package unless your project provides them.
 
 ### Configure Models (Optional)
 
-Agents come with pre-configured models. To change them:
+Agents come with pre-configured models. After the first start creates the editable agent files, change them as needed:
 
 ```bash
 # Edit agent files to set your preferred models
@@ -64,7 +64,7 @@ Then run:
 
 ```bash
 pi
-/workflow "Your goal"
+/workflow start default "Your goal"
 ```
 
 ### Option 2: Manual Copy
@@ -103,7 +103,7 @@ Note: When working from the repo root, the agent will see test files and develop
 ## Quick Start
 
 ```text
-/workflow "Build a Telegram bot that replies pong to /ping"
+/workflow start default "Build a Telegram bot that replies pong to /ping"
 ```
 
 You’ll see:
@@ -145,8 +145,6 @@ tools: read,edit,write,bash
 3. **Use different models per agent** - Set different models for PM, developer, verifier
 
 Run `/reload` after changes.
-
-You can also choose the run model with `/workflow --model <id> "Your goal"`.
 
 ### Workflow Configuration
 
@@ -241,7 +239,7 @@ Run `/reload` after changing configuration files.
 
 ## Commands
 
-- `/workflow "goal"` (or `/workflow start <name> [goal]`)
+- `/workflow start <name> [goal]`
 - `/workflow resume` (continue from saved state)
 - `/workflow stop`
 - `/workflow stop-task <id>`

@@ -1,4 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -12,6 +15,7 @@ type RegisteredHandlers = {
 
 type FakeRpcOptions = {
   systemPrompt?: string;
+  allowedExtensions?: string[];
 };
 
 const rpcInstances: FakeRpcAgent[] = [];
@@ -129,14 +133,10 @@ vi.mock("../.pi/extensions/workflow-orchestrator/runner.js", () => {
 const { default: registerWorkflowExtension } =
   await import("../.pi/extensions/workflow-orchestrator/index.js");
 
-function createMockContext(branch: any[] = []): ExtensionCommandContext {
+function createMockContext(branch: any[] = [], cwd = process.cwd()): ExtensionCommandContext {
   return {
-    cwd: process.cwd(),
+    cwd,
     hasUI: false,
-    model: { id: "test/model" },
-    modelRegistry: {
-      getAvailable: () => [{ id: "test/model", provider: "test" }],
-    },
     sessionManager: {
       getBranch: vi.fn().mockImplementation(() => branch),
     },
@@ -190,17 +190,38 @@ async function waitFor(predicate: () => boolean, timeoutMs = 4000): Promise<void
 }
 
 describe("workflow clarification regression", () => {
+  let projectDir: string;
+
   beforeEach(() => {
     rpcInstances.length = 0;
+    projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "piorch-package-start-"));
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
+    fs.rmSync(projectDir, { recursive: true, force: true });
   });
 
-  it("pauses on clarification during start and resumes after user input", async () => {
+  it("reports a startup error when defaults cannot be copied", async () => {
+    fs.writeFileSync(path.join(projectDir, ".pi"), "not a directory");
     const pi = createMockPi();
-    const ctx = createMockContext();
+    const ctx = createMockContext([], projectDir);
+    registerWorkflowExtension(pi);
+    pi.events.session_start?.({}, ctx);
+
+    await pi.commands.workflow("start default", ctx);
+
+    await waitFor(() =>
+      (pi.sendMessage as any).mock.calls.some(([message]: [any]) =>
+        message.content.startsWith("Workflow error:"),
+      ),
+    );
+    expect(rpcInstances).toHaveLength(0);
+  });
+
+  it.each(["repo", "package"])("clarifies and completes from %s", async (installation) => {
+    const pi = createMockPi();
+    const ctx = createMockContext([], installation === "repo" ? process.cwd() : projectDir);
 
     registerWorkflowExtension(pi);
     pi.events.session_start?.({}, ctx);
@@ -259,5 +280,19 @@ describe("workflow clarification regression", () => {
     expect(resumedWaveState).toBeDefined();
     expect(resumedWaveState?.waveIndex).toBe(0);
     expect(states.some((state) => state.active === false)).toBe(true);
+
+    if (installation === "package") {
+      expect(
+        fs.existsSync(path.join(projectDir, ".pi", "workflows", "default.workflow.json")),
+      ).toBe(true);
+      expect(fs.existsSync(path.join(projectDir, ".pi", "agents", "pm.md"))).toBe(true);
+      expect(rpcInstances.map((runner) => runner.role)).toEqual(["pm", "developer", "verifier"]);
+      for (const runner of rpcInstances) {
+        const extension = runner.role === "pm" ? "workflow-pm-tools" : "workflow-task-tools";
+        expect(runner.options.allowedExtensions).toEqual([
+          path.resolve(".pi", "extensions", extension, "index.ts"),
+        ]);
+      }
+    }
   });
 });

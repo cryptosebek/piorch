@@ -9,12 +9,6 @@ import { Type } from "@sinclair/typebox";
 import { Text } from "@mariozechner/pi-tui";
 import { discoverAgents, findAgentByName } from "./agents.js";
 import {
-  parseWorkflowShorthandGoal,
-  parseWorkflowStartArgs,
-  tokenizeWorkflowArgs,
-  WORKFLOW_COMMANDS,
-} from "./commands.js";
-import {
   loadWorkflowConfig,
   type WorkflowConfig,
   type WorkflowStage,
@@ -22,7 +16,6 @@ import {
   type WorkflowWave,
 } from "./config.js";
 import { runTaskFlow } from "./engine.js";
-import { pickModel } from "./models.js";
 import { setPmWidgetStatus, setTaskListExpanded, updateStatus } from "./render.js";
 import { RpcAgent } from "./runner.js";
 import { appendState, restoreState, type TaskState, type WorkflowState } from "./state.js";
@@ -159,19 +152,8 @@ function sendWorkflowNotice(pi: ExtensionAPI, text: string) {
   });
 }
 
-function workflowErrorMessage(error: unknown, fallback: string): string {
-  if (error instanceof Error && error.message) return error.message;
-  if (typeof error === "string" && error.trim()) return error.trim();
-  return fallback;
-}
-
-function reportWorkflowError(
-  pi: ExtensionAPI,
-  ctx: ExtensionContext,
-  error: unknown,
-  fallback = "Workflow failed",
-): void {
-  const message = workflowErrorMessage(error, fallback);
+function reportStartupError(pi: ExtensionAPI, ctx: ExtensionContext, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
   sendWorkflowNotice(pi, `Workflow error: ${message}`);
   if (ctx.hasUI) ctx.ui.notify(message, "error");
 }
@@ -348,18 +330,17 @@ function resolveAllowedExtensions(
   // This supports custom agent roles beyond pm/developer/verifier
   const role = Object.entries(config.agents).find(([, name]) => name === agentName)?.[0];
 
-  let extensions: string[] | undefined;
   if (role) {
-    extensions =
+    return resolveExtensionPaths(
+      cwd,
       state?.allowedExtensionsByAgent?.[role as keyof typeof state.allowedExtensionsByAgent] ??
-      config.allowedExtensionsByAgent?.[role as keyof typeof config.allowedExtensionsByAgent] ??
-      state?.allowedExtensions ??
-      config.allowedExtensions;
-  } else {
-    extensions = state?.allowedExtensions ?? config.allowedExtensions;
+        config.allowedExtensionsByAgent?.[role as keyof typeof config.allowedExtensionsByAgent] ??
+        state?.allowedExtensions ??
+        config.allowedExtensions,
+    );
   }
 
-  return resolveExtensionPaths(cwd, extensions);
+  return resolveExtensionPaths(cwd, state?.allowedExtensions ?? config.allowedExtensions);
 }
 
 function getRunnerKey(taskId: string, stageId: string): string {
@@ -391,7 +372,7 @@ function getTaskRunner(
     cwd: ctx.cwd,
     sessionFile,
     systemPrompt: agent.systemPrompt,
-    model: pickModel(agent.model, currentState?.model, ctx.model?.id),
+    model: agent.model,
     tools: agent.tools,
     allowedExtensions: resolveAllowedExtensions(ctx.cwd, agentName, config, currentState),
     retry: config.agentRetry,
@@ -767,7 +748,7 @@ function getPmRunner(
     cwd: ctx.cwd,
     sessionFile,
     systemPrompt: pmAgent.systemPrompt,
-    model: pickModel(pmAgent.model, currentState?.model, ctx.model?.id),
+    model: pmAgent.model,
     tools: pmAgent.tools,
     allowedExtensions: resolveAllowedExtensions(ctx.cwd, pmAgent.name, config, currentState),
     retry: config.agentRetry,
@@ -936,26 +917,15 @@ async function resumeWorkflow(pi: ExtensionAPI, ctx: ExtensionCommandContext): P
     return;
   }
 
-  let config: WorkflowConfig;
-  let agents: ReturnType<typeof discoverAgents>["agents"];
-  try {
-    ({ config } = loadWorkflowConfig(ctx.cwd, currentState.workflowName));
-    materializeProjectDefaults(ctx.cwd);
-    ({ agents } = discoverAgents(ctx.cwd));
-  } catch (error) {
-    reportWorkflowError(pi, ctx, error, "Unable to resume workflow");
-    return;
-  }
+  materializeProjectDefaults(ctx.cwd);
+  const { config } = loadWorkflowConfig(ctx.cwd, currentState.workflowName);
+  const { agents } = discoverAgents(ctx.cwd);
   const effectiveConfig: WorkflowConfig = { ...config, goal: currentState.goal };
 
   const abortController = new AbortController();
   const runPromise = (async () => {
     try {
-      setState(pi, ctx, {
-        ...currentState!,
-        active: true,
-        model: pickModel(currentState?.model, ctx.model?.id),
-      });
+      setState(pi, ctx, { ...currentState!, active: true });
       sendWorkflowNotice(pi, "Workflow resumed.");
 
       let previousSummary = currentState?.previousSummary ?? "";
@@ -1036,8 +1006,10 @@ async function resumeWorkflow(pi: ExtensionAPI, ctx: ExtensionCommandContext): P
       setState(pi, ctx, finalState);
       sendWorkflowNotice(pi, "Workflow completed.");
       if (ctx.hasUI) ctx.ui.notify("Workflow completed", "info");
-    } catch (error) {
-      reportWorkflowError(pi, ctx, error);
+    } catch (error: any) {
+      const message = error?.message || "Workflow failed";
+      sendWorkflowNotice(pi, `Workflow error: ${message}`);
+      if (ctx.hasUI) ctx.ui.notify(message, "error");
       if (currentState) {
         setState(pi, ctx, {
           ...currentState,
@@ -1061,25 +1033,15 @@ async function startWorkflow(
   ctx: ExtensionCommandContext,
   workflowName: string,
   goalOverride?: string,
-  commandModel?: string,
 ): Promise<void> {
   if (currentRun) {
     if (ctx.hasUI) ctx.ui.notify("Workflow already running", "warning");
     return;
   }
 
-  let config: WorkflowConfig;
-  let agents: ReturnType<typeof discoverAgents>["agents"];
-  let runModel: string | undefined;
-  try {
-    ({ config } = loadWorkflowConfig(ctx.cwd, workflowName));
-    materializeProjectDefaults(ctx.cwd);
-    ({ agents } = discoverAgents(ctx.cwd));
-    runModel = pickModel(commandModel, ctx.model?.id);
-  } catch (error) {
-    reportWorkflowError(pi, ctx, error, "Unable to start workflow");
-    return;
-  }
+  materializeProjectDefaults(ctx.cwd);
+  const { config } = loadWorkflowConfig(ctx.cwd, workflowName);
+  const { agents } = discoverAgents(ctx.cwd);
   const effectiveConfig: WorkflowConfig = {
     ...config,
     goal: goalOverride ?? config.goal,
@@ -1100,7 +1062,6 @@ async function startWorkflow(
         allowedExtensionsByAgent: effectiveConfig.allowedExtensionsByAgent,
         previousSummary: "",
         waveSummaries: [],
-        model: runModel,
       };
       setState(pi, ctx, initialState);
       sendWorkflowNotice(pi, `Workflow started: ${effectiveConfig.goal}`);
@@ -1161,8 +1122,10 @@ async function startWorkflow(
       setState(pi, ctx, finalState);
       sendWorkflowNotice(pi, "Workflow completed.");
       if (ctx.hasUI) ctx.ui.notify("Workflow completed", "info");
-    } catch (error) {
-      reportWorkflowError(pi, ctx, error);
+    } catch (error: any) {
+      const message = error?.message || "Workflow failed";
+      sendWorkflowNotice(pi, `Workflow error: ${message}`);
+      if (ctx.hasUI) ctx.ui.notify(message, "error");
       if (currentState) {
         setState(pi, ctx, {
           ...currentState,
@@ -1299,15 +1262,17 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("workflow", {
     description: "Manage workflow orchestrator",
     handler: async (args, ctx) => {
-      const tokens = tokenizeWorkflowArgs(args || "");
+      const tokens = (args || "").split(/\s+/).filter(Boolean);
       const command = tokens[0];
+      const name = tokens[1];
+      const goalText = normalizeGoal(tokens.slice(2).join(" "));
 
       if (!command || command === "help") {
         sendWorkflowNotice(
           pi,
           [
             "Workflow commands:",
-            '  /workflow "Your goal"',
+            "  /workflow start <name> [goal]",
             "  /workflow resume",
             "  /workflow status",
             "  /workflow stop",
@@ -1315,43 +1280,30 @@ export default function (pi: ExtensionAPI) {
             "  /workflow message <id> <message>",
             "  /workflow expand",
             "  /workflow collapse",
+            "Example:",
+            '  /workflow start default "Build a Telegram bot"',
           ].join("\n"),
         );
         return;
       }
 
       if (command === "start") {
-        const parsed = parseWorkflowStartArgs(tokens);
-        if (!parsed) {
-          ctx.ui?.notify('Usage: /workflow start [name] "goal"', "warning");
+        if (!name) {
+          ctx.ui?.notify("Usage: /workflow start <name> [goal]", "warning");
           return;
         }
         if (currentState && !currentState.active) {
           ctx.ui?.notify("Existing workflow state found. Use /workflow resume.", "warning");
           return;
         }
-        void startWorkflow(pi, ctx, parsed.workflowName, parsed.goal, parsed.model);
+        void startWorkflow(pi, ctx, name, goalText).catch((error: unknown) =>
+          reportStartupError(pi, ctx, error),
+        );
         return;
       }
-
-      if (!WORKFLOW_COMMANDS.has(command)) {
-        const { goal, model } = parseWorkflowShorthandGoal(tokens);
-        if (!goal) {
-          ctx.ui?.notify('Usage: /workflow [--model <id>] "Your goal"', "warning");
-          return;
-        }
-        if (currentState && !currentState.active) {
-          ctx.ui?.notify("Existing workflow state found. Use /workflow resume.", "warning");
-          return;
-        }
-        void startWorkflow(pi, ctx, "default", goal, model);
-        return;
-      }
-
-      const name = tokens[1];
 
       if (command === "resume") {
-        void resumeWorkflow(pi, ctx);
+        void resumeWorkflow(pi, ctx).catch((error: unknown) => reportStartupError(pi, ctx, error));
         return;
       }
 
@@ -1452,18 +1404,17 @@ export default function (pi: ExtensionAPI) {
     label: "Workflow Run",
     description: "Start a workflow by name (optional goal override).",
     parameters: Type.Object({
-      name: Type.Optional(Type.String({ description: "Workflow name (defaults to default)" })),
+      name: Type.String({ description: "Workflow name" }),
       goal: Type.Optional(Type.String({ description: "Optional goal override" })),
     }),
     async execute(_toolCallId, params) {
       const goal = normalizeGoal(params.goal);
-      const workflowName = params.name?.trim() || "default";
       const command = goal
-        ? `/workflow start ${workflowName} ${JSON.stringify(goal)}`
-        : `/workflow start ${workflowName}`;
+        ? `/workflow start ${params.name} "${goal}"`
+        : `/workflow start ${params.name}`;
       pi.sendUserMessage(command, { deliverAs: "followUp" });
       return {
-        content: [{ type: "text", text: `Queued workflow start: ${workflowName}` }],
+        content: [{ type: "text", text: `Queued workflow start: ${params.name}` }],
         details: {},
       };
     },
