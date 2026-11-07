@@ -23,6 +23,84 @@ describe("config.ts - additional coverage", () => {
     return workflowPath;
   }
 
+  it.each([
+    { parallelism: 1.5 },
+    { maxPmRetries: 0 },
+    { maxPmRetries: 1.5 },
+    { maxTaskRetries: -1 },
+    { maxTaskRetries: 0.5 },
+    { maxWaves: 0 },
+    { agentRetry: { maxAttempts: 1.5 } },
+  ])("rejects invalid execution limits: %j", (limits) => {
+    createWorkflowConfig(
+      "test",
+      JSON.stringify({
+        name: "test",
+        goal: "test",
+        agents: { developer: "dev" },
+        waveSource: { type: "static", staticWaves: [] },
+        taskFlow: {
+          stages: [{ id: "develop", agent: "dev", inputTemplate: "t", outputSchema: {} }],
+        },
+        ...limits,
+      }),
+    );
+    expect(() => loadWorkflowConfig(tempDir, "test")).toThrow();
+  });
+
+  it.each(["../escape", "", "T:1", "T/1"])("rejects unsafe task IDs: %s", (id) => {
+    createWorkflowConfig(
+      "test",
+      JSON.stringify({
+        name: "test",
+        goal: "test",
+        agents: { developer: "dev" },
+        waveSource: {
+          type: "static",
+          staticWaves: [{ goal: "g", tasks: [{ id, title: "t", description: "d" }] }],
+        },
+        taskFlow: {
+          stages: [{ id: "develop", agent: "dev", inputTemplate: "t", outputSchema: {} }],
+        },
+      }),
+    );
+    expect(() => loadWorkflowConfig(tempDir, "test")).toThrow();
+  });
+
+  it("rejects duplicate task IDs and invalid stage graphs before launching", () => {
+    const stage = { id: "develop", agent: "dev", inputTemplate: "t", outputSchema: {} };
+    const task = { id: "T1", title: "t", description: "d" };
+    for (const patch of [
+      { waveSource: { type: "static", staticWaves: [{ goal: "g", tasks: [task, task] }] } },
+      { taskFlow: { stages: [stage, stage] } },
+      { taskFlow: { stages: [{ ...stage, id: "../escape" }] } },
+      {
+        taskFlow: {
+          stages: [
+            {
+              ...stage,
+              transitions: [{ when: { field: "status", equals: "done" }, next: "missing" }],
+            },
+          ],
+        },
+      },
+      { taskFlow: { stages: [] } },
+    ]) {
+      createWorkflowConfig(
+        "test",
+        JSON.stringify({
+          name: "test",
+          goal: "test",
+          agents: {},
+          waveSource: { type: "static", staticWaves: [] },
+          taskFlow: { stages: [stage] },
+          ...patch,
+        }),
+      );
+      expect(() => loadWorkflowConfig(tempDir, "test")).toThrow();
+    }
+  });
+
   describe("sanitizeWorkflowName", () => {
     it("rejects empty name", () => {
       createWorkflowConfig("", JSON.stringify({}));

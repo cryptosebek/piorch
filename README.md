@@ -166,6 +166,8 @@ Edit `.pi/workflows/default.workflow.json` to customize:
   - `reset`
   - `reset_on_malformed_output`
 
+Concurrency and attempt limits must be integers. `parallelism`, `maxWaves`, and `maxPmRetries` must be at least 1; `maxTaskRetries` may be 0. Task and stage IDs accept letters, numbers, dashes, and underscores. IDs must be unique within each wave or stage list.
+
 Example:
 
 ```json
@@ -247,6 +249,10 @@ Run `/reload` after changing configuration files.
 - `/workflow expand`
 - `/workflow collapse`
 - `/workflow help`
+
+Stopped or failed tasks keep the current wave open. Use `/workflow message <id> <instructions>` to resume a stopped task or give an exhausted task a fresh retry budget. `/workflow resume` restores the loop and waits for explicit messages to stopped tasks. A new `/workflow start` can replace a stopped or completed workflow.
+
+New task sessions live under `.pi/workflows/sessions/<runId>/wave-<waveIndex>/`, so the same task ID in separate waves has separate memory. Existing saved session files remain usable. Switching sessions stops the old workflow before restoring the selected session's state.
 
 ## License
 

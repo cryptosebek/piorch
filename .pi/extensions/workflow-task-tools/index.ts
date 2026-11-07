@@ -8,36 +8,38 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 
+export const TaskResultSchema = Type.Object({
+  status: Type.Union([Type.Literal("done"), Type.Literal("pass"), Type.Literal("fail")], {
+    description: "Task status: 'done' for developer, 'pass'/'fail' for verifier",
+  }),
+  summary: Type.Optional(
+    Type.String({
+      description: "Brief summary of what was done (for developer)",
+    }),
+  ),
+  filesChanged: Type.Optional(
+    Type.Array(Type.String(), {
+      description: "List of files created or modified (for developer)",
+    }),
+  ),
+  notes: Type.Optional(
+    Type.String({
+      description: "Additional notes (for developer)",
+    }),
+  ),
+  issues: Type.Optional(
+    Type.Array(Type.String(), {
+      description: "List of issues found (for verifier when status='fail')",
+    }),
+  ),
+});
+
 export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: "report_task_result",
     label: "Report Task Result",
     description: "Report completion of a task (for developer/verifier agents)",
-    parameters: Type.Object({
-      status: Type.Union([Type.Literal("done"), Type.Literal("pass"), Type.Literal("fail")], {
-        description: "Task status: 'done' for developer, 'pass'/'fail' for verifier",
-      }),
-      summary: Type.Optional(
-        Type.String({
-          description: "Brief summary of what was done (for developer)",
-        }),
-      ),
-      filesChanged: Type.Optional(
-        Type.Array(Type.String(), {
-          description: "List of files created or modified (for developer)",
-        }),
-      ),
-      notes: Type.Optional(
-        Type.String({
-          description: "Additional notes (for developer)",
-        }),
-      ),
-      issues: Type.Optional(
-        Type.Array(Type.String(), {
-          description: "List of issues found (for verifier when status='fail')",
-        }),
-      ),
-    }),
+    parameters: TaskResultSchema,
     async execute(_toolCallId, params) {
       const status = params.status;
       let message: string;

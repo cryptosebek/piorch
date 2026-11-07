@@ -35,6 +35,15 @@ describe("state.ts", () => {
   }
 
   describe("appendState", () => {
+    it("keeps past branch snapshots unchanged when a task later advances", () => {
+      const pi = { appendEntry: vi.fn() } as unknown as ExtensionAPI;
+      const state = createBaseState({ tasks: [createTask({ status: "pending" })] });
+      appendState(pi, state);
+      state.tasks[0].status = "verified";
+      const saved = (pi.appendEntry as any).mock.calls[0][1] as WorkflowState;
+      expect(saved.tasks[0].status).toBe("pending");
+    });
+
     it("appends state to session via extension API", () => {
       const mockPi = {
         appendEntry: vi.fn(),

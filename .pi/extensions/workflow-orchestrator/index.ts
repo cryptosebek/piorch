@@ -1,15 +1,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type {
-  ExtensionAPI,
-  ExtensionCommandContext,
-  ExtensionContext,
-} from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 import { Text } from "@mariozechner/pi-tui";
 import { discoverAgents, findAgentByName } from "./agents.js";
 import {
   loadWorkflowConfig,
+  validateWave,
   type WorkflowConfig,
   type WorkflowStage,
   type WorkflowTask,
@@ -20,6 +18,8 @@ import { setPmWidgetStatus, setTaskListExpanded, updateStatus } from "./render.j
 import { RpcAgent } from "./runner.js";
 import { appendState, restoreState, type TaskState, type WorkflowState } from "./state.js";
 import { extractJson, normalizeGoal } from "./utils.js";
+import { TaskResultSchema } from "../workflow-task-tools/index.js";
+import { PmResultSchema } from "../workflow-pm-tools/index.js";
 
 interface WorkflowRunHandle {
   abortController: AbortController;
@@ -27,6 +27,7 @@ interface WorkflowRunHandle {
 }
 
 const PM_MESSAGE_TYPE = "workflow-pm";
+const FallbackTaskResultSchema = Type.Omit(TaskResultSchema, ["status"]);
 
 interface TaskRunner {
   key: string;
@@ -41,7 +42,9 @@ let pmRunner: RpcAgent | null = null;
 let statusInterval: ReturnType<typeof setInterval> | null = null;
 const taskRunners = new Map<string, TaskRunner>();
 const taskLocks = new Set<string>();
-const clarificationWaiters = new Map<string, Set<() => void>>();
+const taskExecutions = new Map<string, WorkflowRunHandle>();
+let pmRunPromise: Promise<string> | null = null;
+const workflowWaiters = new Map<string, Set<() => void>>();
 
 function setState(pi: ExtensionAPI, ctx: ExtensionContext, state: WorkflowState, persist = true) {
   const previousClarificationToken = currentState?.clarificationToken;
@@ -55,7 +58,7 @@ function setState(pi: ExtensionAPI, ctx: ExtensionContext, state: WorkflowState,
       !nextState.waitingForClarification ||
       nextState.active === false)
   ) {
-    signalClarificationResolved(previousClarificationToken);
+    signalWorkflowEvent(previousClarificationToken);
   }
 }
 
@@ -151,27 +154,33 @@ function sendWorkflowNotice(pi: ExtensionAPI, text: string) {
   });
 }
 
+function reportWorkflowError(pi: ExtensionAPI, ctx: ExtensionContext, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  sendWorkflowNotice(pi, `Workflow error: ${message}`);
+  if (ctx.hasUI) ctx.ui.notify(message, "error");
+}
+
 function createClarificationToken(): string {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-export function signalClarificationResolved(token?: string): void {
+export function signalWorkflowEvent(token?: string): void {
   if (!token) return;
-  const waiters = clarificationWaiters.get(token);
+  const waiters = workflowWaiters.get(token);
   if (!waiters) return;
-  clarificationWaiters.delete(token);
+  workflowWaiters.delete(token);
   for (const resolve of waiters) resolve();
 }
 
-function clearClarificationWaiters(): void {
-  const tokens = Array.from(clarificationWaiters.keys());
-  for (const token of tokens) signalClarificationResolved(token);
+function clearWorkflowWaiters(): void {
+  const tokens = Array.from(workflowWaiters.keys());
+  for (const token of tokens) signalWorkflowEvent(token);
 }
 
 function resetTransientWorkflowState(): void {
   pmBusy = false;
   taskLocks.clear();
-  clearClarificationWaiters();
+  clearWorkflowWaiters();
 }
 
 function buildWaveSummary(state: WorkflowState): string {
@@ -206,7 +215,7 @@ function buildPmChatPrompt(state: WorkflowState, message: string): string {
   ].join("\n\n");
 }
 
-export async function waitForClarification(signal: AbortSignal, token: string): Promise<void> {
+export async function waitForWorkflowEvent(signal: AbortSignal, token: string): Promise<void> {
   if (signal.aborted) return;
 
   await new Promise<void>((resolve) => {
@@ -222,16 +231,16 @@ export async function waitForClarification(signal: AbortSignal, token: string): 
 
     const cleanup = () => {
       signal.removeEventListener("abort", onAbort);
-      const waiters = clarificationWaiters.get(token);
+      const waiters = workflowWaiters.get(token);
       if (!waiters) return;
       waiters.delete(onResolve);
-      if (waiters.size === 0) clarificationWaiters.delete(token);
+      if (waiters.size === 0) workflowWaiters.delete(token);
     };
 
-    let waiters = clarificationWaiters.get(token);
+    let waiters = workflowWaiters.get(token);
     if (!waiters) {
       waiters = new Set();
-      clarificationWaiters.set(token, waiters);
+      workflowWaiters.set(token, waiters);
     }
     waiters.add(onResolve);
 
@@ -241,7 +250,7 @@ export async function waitForClarification(signal: AbortSignal, token: string): 
 
 async function pauseForClarification(
   pi: ExtensionAPI,
-  ctx: ExtensionCommandContext,
+  ctx: ExtensionContext,
   signal: AbortSignal,
   waveIndex: number,
   previousSummary: string,
@@ -263,25 +272,7 @@ async function pauseForClarification(
     clarificationToken,
   });
 
-  await waitForClarification(signal, clarificationToken);
-}
-
-async function mapWithConcurrencyLimit<T>(
-  items: T[],
-  concurrency: number,
-  fn: (item: T) => Promise<void>,
-): Promise<void> {
-  if (items.length === 0) return;
-  const limit = Math.max(1, Math.min(concurrency, items.length));
-  let nextIndex = 0;
-  const workers = new Array(limit).fill(null).map(async () => {
-    while (true) {
-      const index = nextIndex++;
-      if (index >= items.length) return;
-      await fn(items[index]);
-    }
-  });
-  await Promise.all(workers);
+  await waitForWorkflowEvent(signal, clarificationToken);
 }
 
 function buildTaskState(task: WorkflowTask): TaskState {
@@ -292,22 +283,33 @@ function buildTaskState(task: WorkflowTask): TaskState {
   };
 }
 
-function ensureSessionFile(state: WorkflowState, task: TaskState, stageId: string): string {
-  const workflowDir = path.join(".pi", "workflows", "sessions", state.runId);
-  fs.mkdirSync(workflowDir, { recursive: true });
-  if (!task.sessionFiles) task.sessionFiles = {};
-  if (!task.sessionFiles[stageId]) {
-    task.sessionFiles[stageId] = path.join(workflowDir, `${task.id}-${stageId}.jsonl`);
-  }
-  return task.sessionFiles[stageId]!;
+function ensureSessionFile(
+  cwd: string,
+  state: WorkflowState,
+  task: TaskState,
+  stageId: string,
+): string {
+  if (!/^[a-zA-Z0-9_-]+$/.test(state.runId)) throw new Error("Invalid workflow run ID");
+  const runDir = path.join(cwd, ".pi", "workflows", "sessions", state.runId);
+  const waveDir = path.join(runDir, `wave-${state.waveIndex}`);
+  task.sessionFiles ??= {};
+  const sessionFile = path.resolve(
+    cwd,
+    task.sessionFiles[stageId] ?? path.join(waveDir, `${task.id}-${stageId}.jsonl`),
+  );
+  if (!sessionFile.startsWith(`${runDir}${path.sep}`))
+    throw new Error("Task session is outside its run directory");
+  fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
+  task.sessionFiles[stageId] = sessionFile;
+  return sessionFile;
 }
 
 function slugify(value: string): string {
   return value.replace(/[^\w.-]+/g, "_");
 }
 
-function ensurePmSessionFile(state: WorkflowState): string {
-  const workflowDir = path.join(".pi", "workflows", "sessions");
+function ensurePmSessionFile(cwd: string, state: WorkflowState): string {
+  const workflowDir = path.join(cwd, ".pi", "workflows", "sessions");
   fs.mkdirSync(workflowDir, { recursive: true });
   const name = slugify(state.workflowName || "default");
   return path.join(workflowDir, `pm-${name}.jsonl`);
@@ -358,7 +360,7 @@ function getTaskRunner(
   const agent = findAgentByName(agents, agentName);
   if (!agent) throw new Error(`Agent not found: ${agentName}`);
 
-  const sessionFile = ensureSessionFile(currentState, task, stage.id);
+  const sessionFile = ensureSessionFile(ctx.cwd, currentState, task, stage.id);
   const runner = new RpcAgent({
     cwd: ctx.cwd,
     sessionFile,
@@ -375,23 +377,21 @@ function getTaskRunner(
 }
 
 function stopTask(task: TaskState) {
-  if (!task.stageId) return;
-  const key = getRunnerKey(task.id, task.stageId);
-  const runner = taskRunners.get(key);
-  runner?.agent.abort();
+  if (task.status === "verified") return;
   task.status = "stopped";
   task.lastNote = "stopped";
+  taskExecutions.get(task.id)?.abortController.abort();
+  if (task.stageId) taskRunners.get(getRunnerKey(task.id, task.stageId))?.agent.abort();
 }
 
-function resetStageMemory(task: TaskState, stageId: string) {
+function resetStageMemory(ctx: ExtensionContext, task: TaskState, stageId: string) {
   if (!currentState) return;
   const key = getRunnerKey(task.id, stageId);
   const runner = taskRunners.get(key);
   runner?.agent.dispose();
   taskRunners.delete(key);
 
-  const workflowDir = path.join(".pi", "workflows", "sessions", currentState.runId);
-  fs.mkdirSync(workflowDir, { recursive: true });
+  const workflowDir = path.dirname(ensureSessionFile(ctx.cwd, currentState, task, stageId));
   if (!task.sessionResetCounts) task.sessionResetCounts = {};
   const nextReset = (task.sessionResetCounts[stageId] ?? 0) + 1;
   task.sessionResetCounts[stageId] = nextReset;
@@ -407,51 +407,33 @@ async function messageTask(
   message: string,
   agents: ReturnType<typeof discoverAgents>["agents"],
 ) {
-  if (!task.stageId) throw new Error("Task has no active stage");
-
-  // Prevent concurrent modifications to the same task
-  if (taskLocks.has(task.id)) {
-    throw new Error(`Task ${task.id} is already being modified`);
-  }
-
+  if (task.status === "verified") throw new Error(`Task ${task.id} is already verified`);
+  if (currentRun?.abortController.signal.aborted) throw new Error("Workflow is stopping");
+  if (taskLocks.has(task.id)) throw new Error(`Task ${task.id} is already being modified`);
   taskLocks.add(task.id);
   try {
-    const stage = findStageById(config.taskFlow.stages, task.stageId);
-    if (!stage) throw new Error(`Stage not found: ${task.stageId}`);
-
-    const key = getRunnerKey(task.id, task.stageId);
-    const runner = taskRunners.get(key);
-    if (runner) {
-      if (!currentState) throw new Error("No workflow state");
-      task.lastNote = "running";
-      task.status = "in_progress";
-      setState(pi, ctx, { ...currentState, tasks: [...currentState.tasks] });
-      if (runner.agent.isRunning()) {
-        runner.agent.sendSteer(message);
-        return;
-      }
-      const taskPrompt = `${message}`;
-      void runner.agent.runPrompt(taskPrompt).catch(() => {
-        // handled by processTask when re-run
-      });
+    const runner = task.stageId ? taskRunners.get(getRunnerKey(task.id, task.stageId)) : undefined;
+    if (task.status === "in_progress" && runner?.agent.isRunning()) {
+      runner.agent.sendSteer(message);
       return;
     }
-
-    if (!currentState?.wave) throw new Error("No active wave");
+    await taskExecutions.get(task.id)?.promise;
+    if (currentRun?.abortController.signal.aborted) throw new Error("Workflow is stopping");
+    if (!currentState?.wave || findTask(task.id) !== task)
+      throw new Error("Task is no longer in the current wave");
+    task.stageId ??= config.taskFlow.stages[0].id;
+    if (!findStageById(config.taskFlow.stages, task.stageId))
+      throw new Error(`Stage not found: ${task.stageId}`);
+    if (task.status === "failed" || task.retries > (config.maxTaskRetries ?? 2)) task.retries = 0;
     task.resumeMessage = message;
-    task.lastNote = "running";
-    task.status = "in_progress";
+    task.status = "pending";
+    task.lastNote = "queued";
     setState(pi, ctx, { ...currentState, tasks: [...currentState.tasks] });
-    void processTask(
-      pi,
-      ctx,
-      config,
-      task,
-      currentState.wave,
-      agents,
-      new AbortController().signal,
-      task.stageId,
-    );
+    signalWorkflowEvent("tasks");
+    if (!currentRun) {
+      setState(pi, ctx, { ...currentState, active: true });
+      launchWorkflow(pi, ctx, { ...config, goal: currentState.goal }, agents);
+    }
   } finally {
     taskLocks.delete(task.id);
   }
@@ -518,45 +500,63 @@ async function processTask(
       }
 
       const runner = getTaskRunner(ctx, config, t, workflowStage, workflowStage.agent, agents);
-      const outputText = await runner.agent.runPrompt(taskPrompt, {
-        onUpdate: (update) => {
-          if (!currentState) return;
-          if (update.type === "text_delta") {
-            appendOutput(t, update.delta, "delta");
-            setState(pi, ctx, { ...currentState, tasks: [...currentState.tasks] }, false);
-            return;
+      try {
+        const outputText = await runner.agent.runPrompt(taskPrompt, {
+          signal,
+          onUpdate: (update) => {
+            if (!currentState) return;
+            if (update.type === "text_delta") {
+              appendOutput(t, update.delta, "delta");
+              setState(pi, ctx, { ...currentState, tasks: [...currentState.tasks] }, false);
+              return;
+            }
+            if (update.type === "tool_start") {
+              appendOutput(t, `tool ${update.toolName}`, "line");
+              setState(pi, ctx, { ...currentState, tasks: [...currentState.tasks] }, false);
+            }
+          },
+        });
+
+        // Get tool calls from the runner - prefer structured tool output over JSON parsing
+        const toolCalls = runner.agent.getLastToolCalls();
+        let output: any = null;
+
+        const reportCall = toolCalls.filter((tc) => tc.name === "report_task_result").at(-1);
+
+        if (reportCall) {
+          // Use the tool arguments directly as output
+          output = reportCall.arguments as Record<string, unknown>;
+        } else {
+          // Fallback to JSON parsing for backward compatibility
+          try {
+            output = extractJson(outputText);
+          } catch {
+            // If no tool was called and JSON parsing fails, return null output
+            output = null;
           }
-          if (update.type === "tool_start") {
-            appendOutput(t, `tool ${update.toolName}`, "line");
-            setState(pi, ctx, { ...currentState, tasks: [...currentState.tasks] }, false);
-          }
-        },
-      });
-
-      // Get tool calls from the runner - prefer structured tool output over JSON parsing
-      const toolCalls = runner.agent.getLastToolCalls();
-      let output: any = null;
-
-      // Look for report_task_result or generate_wave tool calls
-      const reportCall = toolCalls.find((tc) => tc.name === "report_task_result");
-      const waveCall = toolCalls.find((tc) => tc.name === "generate_wave");
-
-      if (reportCall) {
-        // Use the tool arguments directly as output
-        output = reportCall.arguments as Record<string, unknown>;
-      } else if (waveCall) {
-        output = waveCall.arguments as Record<string, unknown>;
-      } else {
-        // Fallback to JSON parsing for backward compatibility
-        try {
-          output = extractJson(outputText);
-        } catch {
-          // If no tool was called and JSON parsing fails, return null output
-          output = null;
         }
-      }
 
-      return { output, outputText, toolCalls };
+        const resultSchema = reportCall ? TaskResultSchema : FallbackTaskResultSchema;
+        if (output !== null && !Value.Check(resultSchema, output)) {
+          throw new Error(
+            "Invalid task report: status and result fields must match report_task_result",
+          );
+        }
+        const expectedStatus = workflowStage.outputSchema.status;
+        if (
+          output !== null &&
+          expectedStatus &&
+          (typeof output.status !== "string" ||
+            (expectedStatus !== "string" && !expectedStatus.split("|").includes(output.status)))
+        ) {
+          throw new Error(`Invalid status for stage ${stage.id}: ${String(output.status)}`);
+        }
+
+        return { output, outputText, toolCalls };
+      } finally {
+        runner.agent.dispose();
+        taskRunners.delete(runner.key);
+      }
     },
     applyOutput: (t, stageId, result) => {
       if (!currentState) return; // Guard against workflow stop during execution
@@ -608,13 +608,6 @@ async function processTask(
         sendAgentSummary(pi, t, stageId, summary);
       }
 
-      const key = t.stageId ? getRunnerKey(t.id, t.stageId) : undefined;
-      if (key) {
-        const runner = taskRunners.get(key);
-        runner?.agent.dispose();
-        taskRunners.delete(key);
-      }
-
       setState(pi, ctx, { ...currentState, tasks: [...currentState.tasks] });
     },
     applyVerifyFailure: (t, stageId, result, errorMessage, reason = "verification_failed") => {
@@ -631,22 +624,25 @@ async function processTask(
       const keepVerifierMemoryOnDeveloperFailure =
         config.taskFlow.memory?.keepVerifierMemoryOnDeveloperFailure ?? true;
       const verifierSelfFailureMemory = config.taskFlow.memory?.verifierSelfFailureMemory ?? "keep";
+      const developerStage = config.taskFlow.stages.find(
+        (stage) => stage.agent === config.agents.developer,
+      )?.id;
 
       if ((reason === "verification_failed" || reason === "error") && !keepDeveloperMemory) {
-        resetStageMemory(t, "develop");
+        if (developerStage) resetStageMemory(ctx, t, developerStage);
       }
       if (reason === "verification_failed" && !keepVerifierMemoryOnDeveloperFailure) {
-        resetStageMemory(t, "verify");
+        resetStageMemory(ctx, t, stageId);
       }
       if (reason === "malformed_output") {
         if (
           verifierSelfFailureMemory === "reset" ||
           verifierSelfFailureMemory === "reset_on_malformed_output"
         ) {
-          resetStageMemory(t, "verify");
+          resetStageMemory(ctx, t, stageId);
         }
       } else if (reason === "error" && verifierSelfFailureMemory === "reset") {
-        resetStageMemory(t, "verify");
+        resetStageMemory(ctx, t, stageId);
       }
 
       setState(pi, ctx, { ...currentState, tasks: [...currentState.tasks] });
@@ -662,6 +658,7 @@ async function processTask(
       if (!currentState) return; // Guard against workflow stop during execution
       t.status = "verified";
       t.stageId = stageId;
+      t.issues = [];
       setState(pi, ctx, { ...currentState, tasks: [...currentState.tasks] });
     },
     markFailed: (t, stageId) => {
@@ -669,6 +666,10 @@ async function processTask(
       t.status = "failed";
       t.stageId = stageId;
       setState(pi, ctx, { ...currentState, tasks: [...currentState.tasks] });
+      sendWorkflowNotice(
+        pi,
+        `Task ${t.id} failed after exhausting retries. Use /workflow message ${t.id} <instructions> to retry, or /workflow stop.`,
+      );
     },
     getField: getByPath,
     getNextStageId: (stagesList, stageId) => getNextStageId(stagesList as WorkflowStage[], stageId),
@@ -684,36 +685,43 @@ async function runWaveWithTasks(
   agents: ReturnType<typeof discoverAgents>["agents"],
   signal: AbortSignal,
 ): Promise<void> {
-  const newState: WorkflowState = {
-    ...currentState!,
-    wave,
-    tasks,
-    updatedAt: Date.now(),
-    previousSummary: currentState?.previousSummary,
-    waveSummaries: currentState?.waveSummaries ?? [],
-  };
-  setState(pi, ctx, newState);
-
-  const runnable = tasks.filter(
-    (task) =>
-      task.status === "pending" || task.status === "in_progress" || task.status === "stopped",
-  );
-
-  await mapWithConcurrencyLimit(runnable, config.parallelism ?? 1, async (task) =>
-    processTask(pi, ctx, config, task, wave, agents, signal, task.stageId),
-  );
-}
-
-async function runWave(
-  pi: ExtensionAPI,
-  ctx: ExtensionContext,
-  config: WorkflowConfig,
-  wave: WorkflowWave,
-  agents: ReturnType<typeof discoverAgents>["agents"],
-  signal: AbortSignal,
-): Promise<void> {
-  const tasks = (wave.tasks ?? []).map(buildTaskState);
-  await runWaveWithTasks(pi, ctx, config, wave, tasks, agents, signal);
+  while (!signal.aborted) {
+    const runnable = tasks
+      .filter((task) => task.status === "pending" || task.status === "in_progress")
+      .filter((task) => !taskExecutions.has(task.id));
+    const available = (config.parallelism ?? 1) - taskExecutions.size;
+    for (const task of runnable.slice(0, Math.max(0, available))) {
+      const execution: WorkflowRunHandle = {
+        abortController: new AbortController(),
+        promise: Promise.resolve(),
+      };
+      taskExecutions.set(task.id, execution);
+      execution.promise = processTask(
+        pi,
+        ctx,
+        config,
+        task,
+        wave,
+        agents,
+        AbortSignal.any([signal, execution.abortController.signal]),
+        task.stageId,
+      )
+        .catch((error) => {
+          if (signal.aborted || execution.abortController.signal.aborted) return;
+          task.status = "failed";
+          task.issues = [error instanceof Error ? error.message : String(error)];
+          task.lastNote = task.issues[0];
+          setState(pi, ctx, { ...currentState!, tasks: [...tasks] });
+          sendWorkflowNotice(pi, `Task ${task.id} failed: ${task.lastNote}`);
+        })
+        .finally(() => {
+          taskExecutions.delete(task.id);
+          signalWorkflowEvent("tasks");
+        });
+    }
+    if (tasks.every((task) => task.status === "verified")) return;
+    await waitForWorkflowEvent(signal, "tasks");
+  }
 }
 
 function disposePmRunner() {
@@ -734,7 +742,7 @@ function getPmRunner(
   const pmAgent = findAgentByName(agents, config.agents.pm);
   if (!pmAgent) throw new Error(`PM agent not found: ${config.agents.pm}`);
 
-  const sessionFile = ensurePmSessionFile(currentState);
+  const sessionFile = ensurePmSessionFile(ctx.cwd, currentState);
   pmRunner = new RpcAgent({
     cwd: ctx.cwd,
     sessionFile,
@@ -760,12 +768,14 @@ async function runPmAgent(
   setPmStatus(ctx, "PM: responding...");
   try {
     const runner = getPmRunner(ctx, config, agents);
-    return await runner.runPrompt(prompt, { signal });
+    pmRunPromise = runner.runPrompt(prompt, { signal });
+    return await pmRunPromise;
   } catch (error) {
     // Dispose runner on error to prevent resource leaks
     disposePmRunner();
     throw error;
   } finally {
+    pmRunPromise = null;
     pmBusy = false;
     setPmStatus(ctx, undefined);
   }
@@ -775,11 +785,12 @@ async function generateWaveFromPm(
   pi: ExtensionAPI,
   config: WorkflowConfig,
   agents: ReturnType<typeof discoverAgents>["agents"],
-  ctx: ExtensionCommandContext,
+  ctx: ExtensionContext,
   signal: AbortSignal,
   previousSummary: string,
   errorMessage?: string,
 ): Promise<{ done: boolean; wave?: WorkflowWave; clarification?: string }> {
+  if (pmRunPromise) await pmRunPromise;
   const promptParts = [`Project goal: ${config.goal}`];
 
   if (previousSummary) {
@@ -801,7 +812,7 @@ async function generateWaveFromPm(
   // Get tool calls from PM runner - prefer structured tool output
   const runner = getPmRunner(ctx, config, agents);
   const toolCalls = runner.getLastToolCalls();
-  const waveCall = toolCalls.find((tc) => tc.name === "generate_wave");
+  const waveCall = toolCalls.filter((tc) => tc.name === "generate_wave").at(-1);
 
   let output: any;
   if (waveCall) {
@@ -815,20 +826,22 @@ async function generateWaveFromPm(
     }
   }
 
+  if (output !== null && !Value.Check(PmResultSchema, output)) {
+    throw new Error("Invalid generate_wave report");
+  }
   if (output?.done === true) {
     sendPmMessage(pi, "PM reports: all work is complete.");
     return { done: true };
   }
 
   if (output?.wave) {
-    const wave = output.wave as WorkflowWave;
-    // Validate wave structure before using it
-    if (!wave.tasks || !Array.isArray(wave.tasks)) {
-      throw new Error('generate_wave returned invalid wave - "tasks" is missing or not an array');
-    }
+    const wave = output.wave;
+    validateWave(wave);
     sendPmMessage(pi, summarizeWave(wave));
     return { done: false, wave };
   }
+
+  if (output !== null) throw new Error("PM output missing wave");
 
   // PM didn't call tool or return JSON - treat as clarification request
   if (outputText && outputText.trim()) {
@@ -841,7 +854,7 @@ async function generateWaveFromPm(
 
 async function resolveWaveForIndex(
   pi: ExtensionAPI,
-  ctx: ExtensionCommandContext,
+  ctx: ExtensionContext,
   config: WorkflowConfig,
   agents: ReturnType<typeof discoverAgents>["agents"],
   signal: AbortSignal,
@@ -871,6 +884,7 @@ async function resolveWaveForIndex(
   let lastError: string | undefined;
 
   while (pmAttempts < maxPmRetries) {
+    if (signal.aborted) throw new Error("Aborted");
     try {
       pmResult = await generateWaveFromPm(
         pi,
@@ -889,6 +903,7 @@ async function resolveWaveForIndex(
       // PM returned clarification - surface it and let the caller wait for user input.
       return { done: false, clarification: true };
     } catch (error: any) {
+      if (signal.aborted) throw error;
       lastError = error.message;
       pmAttempts++;
       if (pmAttempts >= maxPmRetries) throw error;
@@ -898,312 +913,214 @@ async function resolveWaveForIndex(
   return { done: true };
 }
 
-async function resumeWorkflow(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
-  if (currentRun) {
-    if (ctx.hasUI) ctx.ui.notify("Workflow already running", "warning");
-    return;
-  }
-  if (!currentState) {
-    if (ctx.hasUI) ctx.ui.notify("No workflow state to resume", "warning");
-    return;
-  }
-
-  const { config } = loadWorkflowConfig(ctx.cwd, currentState.workflowName);
-  const { agents } = discoverAgents(ctx.cwd);
-  const effectiveConfig: WorkflowConfig = { ...config, goal: currentState.goal };
-
-  const abortController = new AbortController();
-  const runPromise = (async () => {
-    try {
-      setState(pi, ctx, { ...currentState!, active: true });
-      sendWorkflowNotice(pi, "Workflow resumed.");
-
-      let previousSummary = currentState?.previousSummary ?? "";
-
-      for (
-        let waveIndex = currentState!.waveIndex;
-        waveIndex < (effectiveConfig.maxWaves ?? 10);
-        waveIndex++
-      ) {
-        if (abortController.signal.aborted) throw new Error("Workflow aborted");
-
-        const hasExistingWave =
-          waveIndex === currentState!.waveIndex &&
-          currentState?.wave &&
-          currentState.tasks.length > 0;
-        const resolved = await resolveWaveForIndex(
-          pi,
-          ctx,
-          effectiveConfig,
-          agents,
-          abortController.signal,
-          previousSummary,
-          waveIndex,
-          hasExistingWave ? currentState!.wave : undefined,
-          hasExistingWave ? currentState!.tasks : undefined,
-        );
-        if (resolved.done) break;
-        if (resolved.clarification) {
-          await pauseForClarification(pi, ctx, abortController.signal, waveIndex, previousSummary);
-          waveIndex -= 1;
-          continue;
-        }
-        if (!resolved.wave || !resolved.tasks) continue;
-
-        const { wave, tasks } = resolved;
-
-        const updatedState: WorkflowState = {
-          ...currentState!,
-          waveIndex,
-          wave,
-          tasks,
-          updatedAt: Date.now(),
-          previousSummary,
-          waveSummaries: currentState?.waveSummaries ?? [],
-          active: true,
-        };
-        setState(pi, ctx, updatedState);
-
-        await runWaveWithTasks(
-          pi,
-          ctx,
-          effectiveConfig,
-          wave,
-          tasks,
-          agents,
-          abortController.signal,
-        );
-
-        previousSummary = buildWaveSummary(currentState!);
-        const summaries = currentState?.waveSummaries ?? [];
-        const nextSummaries = [...summaries, previousSummary];
-        if (currentState) {
-          setState(pi, ctx, {
-            ...currentState,
-            previousSummary,
-            waveSummaries: nextSummaries,
-          });
-        }
-      }
-
-      const finalState: WorkflowState = {
-        ...currentState!,
-        active: false,
-        waitingForClarification: false,
-        clarificationToken: undefined,
-        updatedAt: Date.now(),
-      };
-      setState(pi, ctx, finalState);
-      sendWorkflowNotice(pi, "Workflow completed.");
-      if (ctx.hasUI) ctx.ui.notify("Workflow completed", "info");
-    } catch (error: any) {
-      const message = error?.message || "Workflow failed";
-      sendWorkflowNotice(pi, `Workflow error: ${message}`);
-      if (ctx.hasUI) ctx.ui.notify(message, "error");
-      if (currentState) {
-        setState(pi, ctx, {
-          ...currentState,
-          active: false,
-          waitingForClarification: false,
-          clarificationToken: undefined,
-          updatedAt: Date.now(),
-        });
-      }
-    } finally {
-      disposePmRunner();
-      currentRun = null;
-    }
-  })();
-
-  currentRun = { abortController, promise: runPromise };
-}
-
-async function startWorkflow(
+function launchWorkflow(
   pi: ExtensionAPI,
-  ctx: ExtensionCommandContext,
-  workflowName: string,
-  goalOverride?: string,
-): Promise<void> {
-  if (currentRun) {
-    if (ctx.hasUI) ctx.ui.notify("Workflow already running", "warning");
-    return;
-  }
-
-  const { config } = loadWorkflowConfig(ctx.cwd, workflowName);
-  const { agents } = discoverAgents(ctx.cwd);
-  const effectiveConfig: WorkflowConfig = {
-    ...config,
-    goal: goalOverride ?? config.goal,
+  ctx: ExtensionContext,
+  config: WorkflowConfig,
+  agents: ReturnType<typeof discoverAgents>["agents"],
+): void {
+  const handle: WorkflowRunHandle = {
+    abortController: new AbortController(),
+    promise: Promise.resolve(),
   };
-
-  const abortController = new AbortController();
-  const runPromise = (async () => {
-    try {
-      const initialState: WorkflowState = {
-        runId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-        workflowName: effectiveConfig.name,
-        goal: effectiveConfig.goal,
-        active: true,
-        waveIndex: 0,
-        tasks: [],
-        updatedAt: Date.now(),
-        allowedExtensions: effectiveConfig.allowedExtensions,
-        allowedExtensionsByAgent: effectiveConfig.allowedExtensionsByAgent,
-        previousSummary: "",
-        waveSummaries: [],
-      };
-      setState(pi, ctx, initialState);
-      sendWorkflowNotice(pi, `Workflow started: ${effectiveConfig.goal}`);
-
-      let previousSummary = initialState.previousSummary ?? "";
-
-      for (let waveIndex = 0; waveIndex < (effectiveConfig.maxWaves ?? 10); waveIndex++) {
-        if (abortController.signal.aborted) throw new Error("Workflow aborted");
-        const resolved = await resolveWaveForIndex(
-          pi,
-          ctx,
-          effectiveConfig,
-          agents,
-          abortController.signal,
-          previousSummary,
-          waveIndex,
-        );
-        if (resolved.done) break;
-        if (resolved.clarification) {
-          await pauseForClarification(pi, ctx, abortController.signal, waveIndex, previousSummary);
-          waveIndex -= 1;
-          continue;
-        }
-        if (!resolved.wave || !resolved.tasks) continue;
-        const { wave } = resolved;
-        const updatedState: WorkflowState = {
-          ...currentState!,
-          waveIndex,
-          wave,
-          tasks: [],
-          updatedAt: Date.now(),
-          previousSummary,
-          waveSummaries: currentState?.waveSummaries ?? [],
-        };
-        setState(pi, ctx, updatedState);
-
-        await runWave(pi, ctx, effectiveConfig, wave, agents, abortController.signal);
-
-        previousSummary = buildWaveSummary(currentState!);
-        const summaries = currentState?.waveSummaries ?? [];
-        const nextSummaries = [...summaries, previousSummary];
-        if (currentState) {
-          setState(pi, ctx, {
-            ...currentState,
-            previousSummary,
-            waveSummaries: nextSummaries,
-          });
-        }
-      }
-
-      const finalState: WorkflowState = {
-        ...currentState!,
-        active: false,
-        waitingForClarification: false,
-        clarificationToken: undefined,
-        updatedAt: Date.now(),
-      };
-      setState(pi, ctx, finalState);
-      sendWorkflowNotice(pi, "Workflow completed.");
-      if (ctx.hasUI) ctx.ui.notify("Workflow completed", "info");
-    } catch (error: any) {
-      const message = error?.message || "Workflow failed";
-      sendWorkflowNotice(pi, `Workflow error: ${message}`);
-      if (ctx.hasUI) ctx.ui.notify(message, "error");
-      if (currentState) {
-        setState(pi, ctx, {
-          ...currentState,
-          active: false,
-          waitingForClarification: false,
-          clarificationToken: undefined,
-          updatedAt: Date.now(),
-        });
-      }
-    } finally {
+  currentRun = handle;
+  handle.promise = runWorkflow(pi, ctx, config, agents, handle.abortController.signal).finally(
+    async () => {
+      handle.abortController.abort();
       disposePmRunner();
-      currentRun = null;
+      for (const runner of taskRunners.values()) runner.agent.dispose();
+      await Promise.allSettled([...taskExecutions.values()].map((execution) => execution.promise));
+      taskRunners.clear();
+      if (currentRun === handle) currentRun = null;
+    },
+  );
+}
+
+async function runWorkflow(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  config: WorkflowConfig,
+  agents: ReturnType<typeof discoverAgents>["agents"],
+  signal: AbortSignal,
+): Promise<void> {
+  let waveIndex = currentState!.waveIndex;
+  let previousSummary = currentState!.previousSummary ?? "";
+  if (
+    currentState!.wave &&
+    currentState!.tasks.every((task) => task.status === "verified") &&
+    (currentState!.waveSummaries?.length ?? 0) > waveIndex
+  )
+    waveIndex++;
+  let completed = false;
+  try {
+    while (waveIndex < (config.maxWaves ?? 10)) {
+      if (signal.aborted) return;
+      const existingWave = waveIndex === currentState!.waveIndex ? currentState!.wave : undefined;
+      const resolved = await resolveWaveForIndex(
+        pi,
+        ctx,
+        config,
+        agents,
+        signal,
+        previousSummary,
+        waveIndex,
+        existingWave,
+        existingWave ? currentState!.tasks : undefined,
+      );
+      if (signal.aborted) return;
+      if (resolved.done) {
+        completed = true;
+        break;
+      }
+      if (resolved.clarification) {
+        await pauseForClarification(pi, ctx, signal, waveIndex, previousSummary);
+        continue;
+      }
+      if (!resolved.wave || !resolved.tasks) throw new Error("Wave is missing tasks");
+      const { wave, tasks } = resolved;
+      validateWave(wave);
+      validateWave({ goal: wave.goal, tasks });
+      setState(pi, ctx, {
+        ...currentState!,
+        waveIndex,
+        wave,
+        tasks,
+        previousSummary,
+        active: true,
+      });
+      await runWaveWithTasks(pi, ctx, config, wave, tasks, agents, signal);
+      if (signal.aborted) return;
+      previousSummary = buildWaveSummary(currentState!);
+      setState(pi, ctx, {
+        ...currentState!,
+        previousSummary,
+        waveSummaries: [
+          ...(currentState!.waveSummaries ?? []).slice(0, waveIndex),
+          previousSummary,
+        ],
+      });
+      waveIndex++;
     }
-  })();
-
-  currentRun = { abortController, promise: runPromise };
-}
-
-async function stopWorkflow(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
-  if (!currentRun) {
-    if (ctx.hasUI) ctx.ui.notify("No active workflow", "warning");
-    return;
-  }
-  const runPromise = currentRun.promise;
-  currentRun.abortController.abort();
-  currentRun = null;
-  for (const runner of taskRunners.values()) {
-    runner.agent.abort();
-    runner.agent.dispose();
-  }
-  taskRunners.clear();
-  disposePmRunner();
-  if (currentState) {
-    currentState.active = false;
-    currentState.waitingForClarification = false;
-    currentState.clarificationToken = undefined;
-    setState(pi, ctx, currentState);
-  }
-  resetTransientWorkflowState();
-  sendWorkflowNotice(pi, "Workflow stopped.");
-  if (ctx.hasUI) ctx.ui.notify("Workflow stopped", "info");
-  await runPromise.catch(() => {});
-}
-
-export default function (pi: ExtensionAPI) {
-  pi.on("session_start", (_event, ctx) => {
-    currentState = restoreState(ctx);
-    if (currentState?.active) {
+    completed ||=
+      config.waveSource.type === "static" &&
+      waveIndex >= (config.waveSource.staticWaves?.length ?? 0);
+    const notice = completed
+      ? "Workflow completed."
+      : "Workflow paused: reached maxWaves. Increase the limit and resume to continue.";
+    sendWorkflowNotice(pi, notice);
+    if (ctx.hasUI) ctx.ui.notify(notice, completed ? "info" : "warning");
+  } catch (error: any) {
+    if (!signal.aborted) reportWorkflowError(pi, ctx, error);
+  } finally {
+    if (currentState)
       setState(pi, ctx, {
         ...currentState,
         active: false,
         waitingForClarification: false,
         clarificationToken: undefined,
       });
-    } else if (currentState) {
-      updateStatus(ctx, currentState);
+  }
+}
+
+async function resumeWorkflow(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+  if (currentRun) throw new Error("Workflow already running");
+  if (!currentState) throw new Error("No workflow state to resume");
+  const { config } = loadWorkflowConfig(ctx.cwd, currentState.workflowName);
+  const { agents } = discoverAgents(ctx.cwd);
+  setState(pi, ctx, { ...currentState, active: true });
+  sendWorkflowNotice(pi, "Workflow resumed.");
+  launchWorkflow(pi, ctx, { ...config, goal: currentState.goal }, agents);
+}
+
+async function startWorkflow(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  workflowName: string,
+  goalOverride?: string,
+): Promise<void> {
+  if (currentRun) throw new Error("Workflow already running");
+  const { config } = loadWorkflowConfig(ctx.cwd, workflowName);
+  const { agents } = discoverAgents(ctx.cwd);
+  const effectiveConfig = { ...config, goal: goalOverride ?? config.goal };
+  setState(pi, ctx, {
+    runId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    workflowName,
+    goal: effectiveConfig.goal,
+    active: true,
+    waveIndex: 0,
+    tasks: [],
+    updatedAt: Date.now(),
+    allowedExtensions: effectiveConfig.allowedExtensions,
+    allowedExtensionsByAgent: effectiveConfig.allowedExtensionsByAgent,
+    previousSummary: "",
+    waveSummaries: [],
+  });
+  sendWorkflowNotice(pi, `Workflow started: ${effectiveConfig.goal}`);
+  launchWorkflow(pi, ctx, effectiveConfig, agents);
+}
+
+async function stopWorkflow(pi: ExtensionAPI, ctx: ExtensionContext, notify = true): Promise<void> {
+  const run = currentRun;
+  if (currentState) {
+    for (const task of currentState.tasks) {
+      if (task.status === "in_progress" || task.status === "pending") stopTask(task);
     }
+    setState(pi, ctx, {
+      ...currentState,
+      active: false,
+      waitingForClarification: false,
+      clarificationToken: undefined,
+    });
+  }
+  run?.abortController.abort();
+  for (const runner of taskRunners.values()) runner.agent.dispose();
+  const pmPromise = pmRunPromise;
+  disposePmRunner();
+  await Promise.allSettled([
+    run?.promise,
+    pmPromise,
+    ...[...taskExecutions.values()].map((execution) => execution.promise),
+  ]);
+  taskRunners.clear();
+  resetTransientWorkflowState();
+  if (notify) sendWorkflowNotice(pi, run ? "Workflow stopped." : "No active workflow.");
+}
+
+export default function (pi: ExtensionAPI) {
+  const restoreWorkflow = (_event: unknown, ctx: ExtensionContext) => {
+    const saved = restoreState(ctx);
+    currentState = saved ? structuredClone(saved) : undefined;
+    if (currentState) {
+      for (const task of currentState.tasks) {
+        if (task.status === "in_progress" || task.status === "pending") {
+          task.status = "stopped";
+          task.lastNote = "stopped";
+        }
+      }
+      setState(pi, ctx, {
+        ...currentState,
+        active: false,
+        waitingForClarification: false,
+        clarificationToken: undefined,
+      });
+    } else updateStatus(ctx);
     setPmStatus(ctx, undefined);
-    taskRunners.clear();
-    disposePmRunner();
     resetTransientWorkflowState();
     startStatusTicker(ctx);
-  });
-
+  };
+  pi.on("session_start", restoreWorkflow);
+  pi.on("session_switch", restoreWorkflow);
+  pi.on("session_fork", restoreWorkflow);
+  pi.on("session_tree", restoreWorkflow);
+  const stopBeforeSwitch = async (_event: unknown, ctx: ExtensionContext) => {
+    await stopWorkflow(pi, ctx, false);
+  };
+  pi.on("session_before_switch", stopBeforeSwitch);
+  pi.on("session_before_fork", stopBeforeSwitch);
+  pi.on("session_before_tree", stopBeforeSwitch);
   pi.on("session_shutdown", async (_event, ctx) => {
     stopStatusTicker();
-    if (currentRun) {
-      currentRun.abortController.abort();
-      currentRun = null;
-    }
-    for (const runner of taskRunners.values()) {
-      runner.agent.abort();
-      runner.agent.dispose();
-    }
-    taskRunners.clear();
-    disposePmRunner();
-    if (currentState) {
-      currentState.active = false;
-      currentState.waitingForClarification = false;
-      currentState.clarificationToken = undefined;
-      currentState.tasks = (currentState.tasks ?? []).map((task) => {
-        if (task.status === "in_progress") {
-          return { ...task, status: "stopped", lastNote: "stopped" };
-        }
-        return task;
-      });
-      setState(pi, ctx, currentState);
-    }
-    resetTransientWorkflowState();
+    await stopWorkflow(pi, ctx, false);
   });
 
   pi.on("input", async (event, ctx) => {
@@ -1227,7 +1144,7 @@ export default function (pi: ExtensionAPI) {
         effectiveConfig,
         agents,
         ctx,
-        new AbortController().signal,
+        currentRun?.abortController.signal ?? new AbortController().signal,
         prompt,
       );
       sendPmMessage(pi, outputText);
@@ -1281,16 +1198,14 @@ export default function (pi: ExtensionAPI) {
           ctx.ui?.notify("Usage: /workflow start <name> [goal]", "warning");
           return;
         }
-        if (currentState && !currentState.active) {
-          ctx.ui?.notify("Existing workflow state found. Use /workflow resume.", "warning");
-          return;
-        }
-        void startWorkflow(pi, ctx, name, goalText);
+        void startWorkflow(pi, ctx, name, goalText).catch((error) =>
+          reportWorkflowError(pi, ctx, error),
+        );
         return;
       }
 
       if (command === "resume") {
-        void resumeWorkflow(pi, ctx);
+        void resumeWorkflow(pi, ctx).catch((error) => reportWorkflowError(pi, ctx, error));
         return;
       }
 
@@ -1348,7 +1263,9 @@ export default function (pi: ExtensionAPI) {
         }
         const { config } = loadWorkflowConfig(ctx.cwd, currentState.workflowName);
         const { agents } = discoverAgents(ctx.cwd);
-        void messageTask(pi, ctx, config, task, message, agents);
+        void messageTask(pi, ctx, config, task, message, agents).catch((error) =>
+          reportWorkflowError(pi, ctx, error),
+        );
         return;
       }
 
@@ -1394,16 +1311,9 @@ export default function (pi: ExtensionAPI) {
       name: Type.String({ description: "Workflow name" }),
       goal: Type.Optional(Type.String({ description: "Optional goal override" })),
     }),
-    async execute(_toolCallId, params) {
-      const goal = normalizeGoal(params.goal);
-      const command = goal
-        ? `/workflow start ${params.name} "${goal}"`
-        : `/workflow start ${params.name}`;
-      pi.sendUserMessage(command, { deliverAs: "followUp" });
-      return {
-        content: [{ type: "text", text: `Queued workflow start: ${params.name}` }],
-        details: {},
-      };
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      await startWorkflow(pi, ctx, params.name, normalizeGoal(params.goal));
+      return { content: [{ type: "text", text: `Started workflow: ${params.name}` }], details: {} };
     },
   });
 

@@ -1,195 +1,205 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import { spawn } from "node:child_process";
 import {
+  RpcAgent,
   getAgentRetryDelayMs,
   isRetryableAgentError,
   normalizeAgentRetryOptions,
 } from "../.pi/extensions/workflow-orchestrator/runner.js";
 
-/**
- * Tests for tool call capture logic in RpcAgent.
- *
- * These tests verify that tool calls are properly captured from RPC events.
- * The actual RPC communication is tested indirectly through the event parsing logic.
- */
+vi.mock("node:child_process", () => ({ spawn: vi.fn() }));
 
-describe("Tool call capture from RPC events", () => {
-  interface ToolCallCapture {
-    name: string;
-    arguments: Record<string, unknown>;
+class FakeProcess extends EventEmitter {
+  stdout = new PassThrough();
+  stderr = new PassThrough();
+  stdin = new PassThrough();
+  writes: any[] = [];
+  kill = vi.fn(() => true);
+
+  constructor() {
+    super();
+    this.stdin.on("data", (chunk) => this.writes.push(JSON.parse(chunk.toString())));
   }
 
-  interface MockRunState {
-    toolCalls: ToolCallCapture[];
-    lastAssistantText: string;
+  emitEvent(event: unknown) {
+    this.stdout.write(`${JSON.stringify(event)}\n`);
   }
 
-  function createMockRunState(): MockRunState {
-    return {
-      toolCalls: [],
-      lastAssistantText: "",
-    };
+  finish(text = "done") {
+    this.emitEvent({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text }] },
+    });
+    this.emitEvent({ type: "agent_end" });
+  }
+}
+
+describe("RpcAgent", () => {
+  let processes: FakeProcess[];
+  let agents: RpcAgent[];
+  beforeEach(() => {
+    processes = [];
+    agents = [];
+    vi.mocked(spawn).mockImplementation(() => {
+      const proc = new FakeProcess();
+      processes.push(proc);
+      return proc as any;
+    });
+  });
+  afterEach(() => {
+    for (const agent of agents) agent.dispose();
+    vi.useRealTimers();
+    vi.clearAllMocks();
+  });
+  function createAgent() {
+    const agent = new RpcAgent({
+      cwd: process.cwd(),
+      sessionFile: "unused.jsonl",
+      systemPrompt: "",
+      retry: { maxAttempts: 2, initialDelayMs: 20, maxDelayMs: 20, jitterMs: 0 },
+    });
+    agents.push(agent);
+    return agent;
   }
 
-  function processMessageEndEvent(
-    run: MockRunState,
-    event: { message: { role: string; content: any[] } },
-  ) {
-    if (event.message?.role !== "assistant") return;
-
-    for (const part of event.message.content) {
-      if (typeof part === "string") {
-        run.lastAssistantText = part;
-      } else if (part.type === "text") {
-        run.lastAssistantText = part.text;
-      } else if (part.type === "toolCall") {
-        // This is the fix: capture tool calls from message content
-        run.toolCalls.push({ name: part.name, arguments: part.arguments });
-      }
-    }
-  }
-
-  function processToolExecutionStartEvent(
-    run: MockRunState,
-    event: { toolName: string; args: any },
-  ) {
-    // Capture tool call arguments for structured output
-    run.toolCalls.push({ name: event.toolName, arguments: event.args ?? {} });
-  }
-
-  it("captures tool calls from tool_execution_start events", () => {
-    const run = createMockRunState();
-
-    processToolExecutionStartEvent(run, {
+  it("captures each successful tool execution once and excludes failed or unfinished calls", async () => {
+    const agent = createAgent();
+    const run = agent.runPrompt("verify");
+    const proc = processes[0];
+    const reports = [{ status: "pass" }, { status: "fail", issues: ["bug"] }];
+    proc.emitEvent({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "toolCall", name: "report_task_result", arguments: reports[0] }],
+      },
+    });
+    reports.forEach((args, index) => {
+      proc.emitEvent({
+        type: "tool_execution_start",
+        toolCallId: String(index),
+        toolName: "report_task_result",
+        args,
+      });
+      proc.emitEvent({
+        type: "tool_execution_end",
+        toolCallId: String(index),
+        toolName: "report_task_result",
+        isError: false,
+      });
+    });
+    proc.emitEvent({
+      type: "tool_execution_start",
+      toolCallId: "bad",
       toolName: "report_task_result",
-      args: { status: "done", summary: "Test completed" },
+      args: { status: "pass", issues: "bad" },
     });
-
-    expect(run.toolCalls).toHaveLength(1);
-    expect(run.toolCalls[0].name).toBe("report_task_result");
-    expect(run.toolCalls[0].arguments).toEqual({
-      status: "done",
-      summary: "Test completed",
+    proc.emitEvent({
+      type: "tool_execution_end",
+      toolCallId: "bad",
+      toolName: "report_task_result",
+      isError: true,
     });
+    proc.emitEvent({
+      type: "tool_execution_start",
+      toolCallId: "unfinished",
+      toolName: "generate_wave",
+      args: { done: true },
+    });
+    proc.finish();
+    await expect(run).resolves.toBe("done");
+    expect(agent.getLastToolCalls()).toEqual(
+      reports.map((arguments_) => ({ name: "report_task_result", arguments: arguments_ })),
+    );
   });
 
-  it("captures tool calls from message_end content parts", () => {
-    const run = createMockRunState();
-
-    processMessageEndEvent(run, {
-      message: {
-        role: "assistant",
-        content: [
-          { type: "text", text: "I'll call the tool now" },
-          {
-            type: "toolCall",
-            name: "generate_wave",
-            arguments: {
-              done: false,
-              wave: {
-                goal: "Test wave",
-                tasks: [{ id: "T1", title: "Test task", description: "Do something" }],
-              },
-            },
-          },
-        ],
-      },
+  it("rejects failed prompt responses with the provider error", async () => {
+    const agent = createAgent();
+    const run = agent.runPrompt("plan");
+    const assertion = expect(run).rejects.toThrow("No API key found");
+    processes[0].emitEvent({
+      type: "response",
+      command: "prompt",
+      id: processes[0].writes[0].id,
+      success: false,
+      error: "No API key found",
     });
-
-    expect(run.toolCalls).toHaveLength(1);
-    expect(run.toolCalls[0].name).toBe("generate_wave");
-    expect(run.toolCalls[0].arguments).toEqual({
-      done: false,
-      wave: {
-        goal: "Test wave",
-        tasks: [{ id: "T1", title: "Test task", description: "Do something" }],
-      },
-    });
+    await assertion;
+    expect(agent.isRunning()).toBe(false);
+    expect(processes[0].kill).toHaveBeenCalled();
   });
 
-  it("captures multiple tool calls from both sources", () => {
-    const run = createMockRunState();
-
-    // First: tool_execution_start event
-    processToolExecutionStartEvent(run, {
-      toolName: "read",
-      args: { path: "/test/file.txt" },
-    });
-
-    // Second: message_end with toolCall in content
-    processMessageEndEvent(run, {
-      message: {
-        role: "assistant",
-        content: [
-          {
-            type: "toolCall",
-            name: "report_task_result",
-            arguments: { status: "done", filesChanged: ["/test/file.txt"] },
-          },
-        ],
-      },
-    });
-
-    expect(run.toolCalls).toHaveLength(2);
-    expect(run.toolCalls[0].name).toBe("read");
-    expect(run.toolCalls[0].arguments).toEqual({ path: "/test/file.txt" });
-    expect(run.toolCalls[1].name).toBe("report_task_result");
-    expect(run.toolCalls[1].arguments).toEqual({
-      status: "done",
-      filesChanged: ["/test/file.txt"],
-    });
+  it.each(["process", "stdin"])("handles %s errors without an uncaught event", async (source) => {
+    const agent = createAgent();
+    const run = agent.runPrompt("plan");
+    const assertion = expect(run).rejects.toThrow("spawn pi ENOENT");
+    const emitter: EventEmitter = source === "stdin" ? processes[0].stdin : processes[0];
+    expect(() => emitter.emit("error", new Error("spawn pi ENOENT"))).not.toThrow();
+    await assertion;
   });
 
-  it("returns empty array when no tool calls", () => {
-    const run = createMockRunState();
+  it.each(["abort", "signal"])(
+    "cancels retry delay through %s without spawning again",
+    async (method) => {
+      vi.useFakeTimers();
+      const agent = createAgent();
+      const controller = new AbortController();
+      const run = agent.runPrompt("plan", { signal: controller.signal });
+      const assertion = expect(run).rejects.toThrow(/aborted/i);
+      processes[0].emitEvent({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [],
+          stopReason: "error",
+          errorMessage: "429 rate limit",
+        },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(agent.isRunning()).toBe(true);
+      await expect(agent.runPrompt("overlap")).rejects.toThrow("already running");
+      if (method === "signal") controller.abort();
+      else agent.abort();
+      await assertion;
+      await vi.runAllTimersAsync();
+      expect(processes).toHaveLength(1);
+      expect(agent.isRunning()).toBe(false);
+    },
+  );
 
-    processMessageEndEvent(run, {
+  it("retries transient failures, keeps queued steering, and ignores old process events", async () => {
+    vi.useFakeTimers();
+    const agent = createAgent();
+    const run = agent.runPrompt("plan");
+    processes[0].emitEvent({
+      type: "message_end",
       message: {
         role: "assistant",
-        content: [{ type: "text", text: "Hello, world!" }],
+        content: [],
+        stopReason: "error",
+        errorMessage: "503 unavailable",
       },
     });
-
-    expect(run.toolCalls).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(0);
+    agent.sendSteer("Use the corrected requirement");
+    await vi.advanceTimersByTimeAsync(20);
+    expect(processes).toHaveLength(2);
+    processes[0].emit("close", 1);
+    processes[0].finish("stale result");
+    expect(processes[1].writes[0].message).toContain("corrected requirement");
+    processes[1].finish("correct result");
+    await expect(run).resolves.toBe("correct result");
   });
 
-  it("handles text-only message_end events", () => {
-    const run = createMockRunState();
-
-    processMessageEndEvent(run, {
-      message: {
-        role: "assistant",
-        content: [
-          { type: "text", text: "First part" },
-          { type: "text", text: "Second part" },
-        ],
-      },
-    });
-
-    expect(run.toolCalls).toHaveLength(0);
-    expect(run.lastAssistantText).toBe("Second part");
-  });
-
-  it("handles mixed text and tool calls in message_end", () => {
-    const run = createMockRunState();
-
-    processMessageEndEvent(run, {
-      message: {
-        role: "assistant",
-        content: [
-          { type: "text", text: "Let me analyze the code..." },
-          {
-            type: "toolCall",
-            name: "grep",
-            arguments: { pattern: "function", path: "src/index.ts" },
-          },
-          { type: "text", text: "Found it!" },
-        ],
-      },
-    });
-
-    expect(run.toolCalls).toHaveLength(1);
-    expect(run.toolCalls[0].name).toBe("grep");
-    expect(run.lastAssistantText).toBe("Found it!");
+  it("does not launch an agent for an already aborted prompt", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(createAgent().runPrompt("plan", { signal: controller.signal })).rejects.toThrow(
+      "Aborted",
+    );
+    expect(processes).toHaveLength(0);
   });
 });
 

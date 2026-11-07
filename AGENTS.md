@@ -40,10 +40,12 @@ Reload extensions:
 ## Common behaviors
 
 - Subagents run in **RPC mode** with per-task session files at:
-  `.pi/workflows/sessions/<runId>/<taskId>-<stage>.jsonl`
+  `.pi/workflows/sessions/<runId>/wave-<waveIndex>/<taskId>-<stage>.jsonl`
 - `/workflow stop-task <id>` aborts a task but keeps session context.
 - `/workflow message <id> <text>` sends a steer message to the running task, or resumes a stopped task.
 - `/workflow resume` restarts the workflow loop from the saved state without starting new agents automatically.
+- Stopped and failed tasks keep their wave open. Send a task message to resume work or explicitly retry an exhausted task.
+- Switching, forking, or navigating sessions stops and drains the old workflow before restoring the selected branch.
 - While workflow is active, normal chat is routed to PM (commands still work).
 
 ## Session file format
@@ -53,7 +55,8 @@ Session files are JSONL (one JSON event per line):
 ```jsonl
 {"type":"prompt","message":"Project goal: Build a bot\nTask: T1..."}
 {"type":"message_end","message":{"role":"assistant","content":[...]}}
-{"type":"tool_execution_start","toolName":"report_task_result","args":{"status":"done",...}}
+{"type":"tool_execution_start","toolCallId":"call-1","toolName":"report_task_result","args":{"status":"done",...}}
+{"type":"tool_execution_end","toolCallId":"call-1","toolName":"report_task_result","isError":false}
 {"type":"agent_end"}
 ```
 
@@ -61,13 +64,15 @@ Session files are JSONL (one JSON event per line):
 
 - `prompt` - The prompt sent to the agent
 - `message_end` - Agent's text response
-- `tool_execution_start` - Tool call with arguments (this is captured for structured output)
+- `tool_execution_start` - Tool call with arguments, held until execution succeeds
+- `tool_execution_end` - Confirms success; failed calls are excluded from structured output
 - `agent_end` - Agent completed
 
 **Locations:**
 
 - PM sessions: `.pi/workflows/sessions/pm-<workflow>.jsonl`
-- Task sessions: `.pi/workflows/sessions/<runId>/<taskId>-<stageId>.jsonl`
+- Task sessions: `.pi/workflows/sessions/<runId>/wave-<waveIndex>/<taskId>-<stageId>.jsonl` (wave index is 0-based)
+- Existing saved session paths inside the run directory remain usable on resume.
 
 ## UI notes
 
@@ -112,13 +117,13 @@ Agents report via structured tools instead of JSON text:
 | Developer | `report_task_result` | Report task done with files/summary   |
 | Verifier  | `report_task_result` | Report pass/fail with issues          |
 
-**Why tools?** Previously, agents output JSON text that was parsed with `extractJson()`. Malformed JSON caused silent failures where verifier reports were lost. Tools provide structured arguments that are captured directly from `tool_execution_start` events.
+**Why tools?** Previously, agents output JSON text that was parsed with `extractJson()`. Malformed JSON caused silent failures where verifier reports were lost. Reports now use the latest successful reporting-tool execution, with schema validation before applying the result.
 
 **Fallback:** If an agent doesn't call the tool, their text output is captured and stored in `stageOutputs[stageId]`. This ensures workflow continuity.
 
 **Tool isolation:** Each extension provides specific tools, and `allowedExtensionsByAgent` ensures agents only see their relevant tools.
 
-**PM wave validation:** If the PM returns a wave without a valid `tasks` array, the workflow automatically retries (up to `maxPmRetries` times from workflow config), passing the error message back to the PM so it can correct its output. This prevents crashes from malformed PM responses.
+**PM wave validation:** Invalid task shapes, unsafe IDs, and duplicate IDs in a wave trigger retries (up to `maxPmRetries` attempts), passing the validation error back to the PM. Task and stage IDs accept letters, numbers, dashes, and underscores. Reusing a task ID in another wave uses a separate session directory.
 
 ## Template variables
 

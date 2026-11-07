@@ -55,6 +55,60 @@ function baseOptions(task: TestTask) {
 }
 
 describe("runTaskFlow", () => {
+  it("counts failures and forwards issues when resuming at verification", async () => {
+    const task: TestTask = { id: "T1", status: "pending", retries: 0 };
+    let verifyCalls = 0;
+    await runTaskFlow({
+      ...baseOptions(task),
+      startStageId: "verify",
+      maxRetries: 1,
+      runStage: async (stage) => {
+        if (stage.id === "verify") verifyCalls++;
+        return { output: { status: stage.id === "verify" ? "fail" : "done", issues: ["bug"] } };
+      },
+    });
+    expect(verifyCalls).toBe(2);
+    expect(task).toMatchObject({ status: "failed", retries: 2, issues: ["bug"] });
+  });
+
+  it.each(["unknown", "fail"])("bounds %s results for custom stage names", async (status) => {
+    const task: TestTask = { id: "T1", status: "pending", retries: 0 };
+    let calls = 0;
+    await runTaskFlow({
+      ...baseOptions(task),
+      stages: [
+        { id: "implement" },
+        {
+          id: "review",
+          transitions: [
+            { when: { field: "status", equals: "fail" }, next: "implement" },
+            { when: { field: "status", equals: "pass" }, next: "complete" },
+          ],
+        },
+      ],
+      maxRetries: 1,
+      runStage: async () => {
+        calls++;
+        return { output: { status } };
+      },
+    });
+    expect(task).toMatchObject({ status: "failed", retries: 2 });
+    expect(calls).toBe(status === "fail" ? 4 : 3);
+  });
+
+  it.each([true, false])("does not apply results or errors after a stop (%s)", async (throws) => {
+    const task: TestTask = { id: "T1", status: "pending", retries: 0 };
+    await runTaskFlow({
+      ...baseOptions(task),
+      runStage: async () => {
+        task.status = "stopped";
+        if (throws) throw new Error("Aborted");
+        return { output: { status: "done" } };
+      },
+    });
+    expect(task).toEqual({ id: "T1", status: "stopped", retries: 0 });
+  });
+
   it("completes on verify pass", async () => {
     const task: TestTask = { id: "T1", status: "pending", retries: 0 };
     let calls = 0;

@@ -3,6 +3,8 @@ import * as path from "node:path";
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
+const IdentifierSchema = Type.String({ pattern: "^[a-zA-Z0-9_-]+$" });
+
 const TransitionSchema = Type.Object({
   when: Type.Object({
     field: Type.String(),
@@ -12,7 +14,7 @@ const TransitionSchema = Type.Object({
 });
 
 const StageSchema = Type.Object({
-  id: Type.String(),
+  id: IdentifierSchema,
   agent: Type.String(),
   inputTemplate: Type.String(),
   outputSchema: Type.Record(Type.String(), Type.String()),
@@ -32,7 +34,7 @@ const TaskFlowMemorySchema = Type.Object({
 });
 
 const TaskSchema = Type.Object({
-  id: Type.String(),
+  id: IdentifierSchema,
   title: Type.String(),
   description: Type.String(),
   requirements: Type.Optional(Type.String()),
@@ -54,7 +56,7 @@ const AllowedExtensionsByAgentSchema = Type.Record(Type.String(), Type.Array(Typ
 const AgentsSchema = Type.Record(Type.String(), Type.String());
 
 const AgentRetrySchema = Type.Object({
-  maxAttempts: Type.Optional(Type.Number()),
+  maxAttempts: Type.Optional(Type.Integer()),
   initialDelayMs: Type.Optional(Type.Number()),
   maxDelayMs: Type.Optional(Type.Number()),
   backoffMultiplier: Type.Optional(Type.Number()),
@@ -64,10 +66,10 @@ const AgentRetrySchema = Type.Object({
 const WorkflowSchema = Type.Object({
   name: Type.String(),
   goal: Type.String(),
-  maxWaves: Type.Optional(Type.Number()),
-  maxTaskRetries: Type.Optional(Type.Number()),
-  maxPmRetries: Type.Optional(Type.Number()),
-  parallelism: Type.Optional(Type.Number()),
+  maxWaves: Type.Optional(Type.Integer()),
+  maxTaskRetries: Type.Optional(Type.Integer()),
+  maxPmRetries: Type.Optional(Type.Integer()),
+  parallelism: Type.Optional(Type.Integer()),
   agentRetry: Type.Optional(AgentRetrySchema),
   allowedExtensions: Type.Optional(Type.Array(Type.String())),
   allowedExtensionsByAgent: Type.Optional(AllowedExtensionsByAgentSchema),
@@ -83,6 +85,19 @@ export type WorkflowConfig = Static<typeof WorkflowSchema>;
 export type WorkflowStage = Static<typeof StageSchema>;
 export type WorkflowTask = Static<typeof TaskSchema>;
 export type WorkflowWave = Static<typeof WaveSchema>;
+
+export function validateWave(wave: unknown): asserts wave is WorkflowWave {
+  if (!Value.Check(WaveSchema, wave)) {
+    throw new Error(
+      "Invalid wave: expected a goal and tasks with safe IDs, titles, and descriptions",
+    );
+  }
+  const ids = new Set<string>();
+  for (const task of wave.tasks) {
+    if (ids.has(task.id)) throw new Error(`Duplicate task ID: ${task.id}`);
+    ids.add(task.id);
+  }
+}
 
 export interface LoadedWorkflow {
   config: WorkflowConfig;
@@ -135,6 +150,7 @@ export function loadWorkflowConfig(cwd: string, name: string): LoadedWorkflow {
   // Apply defaults
   config.maxWaves = config.maxWaves ?? 10;
   config.maxTaskRetries = config.maxTaskRetries ?? 2;
+  config.maxPmRetries = config.maxPmRetries ?? 3;
   config.parallelism = config.parallelism ?? 1;
   config.agentRetry = config.agentRetry ?? {};
   config.agentRetry.maxAttempts = config.agentRetry.maxAttempts ?? 5;
@@ -152,6 +168,9 @@ export function loadWorkflowConfig(cwd: string, name: string): LoadedWorkflow {
   if (config.parallelism < 1) {
     throw new Error("parallelism must be at least 1");
   }
+  if (config.maxWaves < 1) throw new Error("maxWaves must be at least 1");
+  if (config.maxTaskRetries < 0) throw new Error("maxTaskRetries must be at least 0");
+  if (config.maxPmRetries < 1) throw new Error("maxPmRetries must be at least 1");
   if (config.agentRetry.maxAttempts < 1) {
     throw new Error("agentRetry.maxAttempts must be at least 1");
   }
@@ -167,6 +186,20 @@ export function loadWorkflowConfig(cwd: string, name: string): LoadedWorkflow {
   if (config.agentRetry.jitterMs < 0) {
     throw new Error("agentRetry.jitterMs must be at least 0");
   }
+
+  const stages = config.taskFlow.stages;
+  if (stages.length === 0) throw new Error("At least one task stage is required");
+  const stageIds = new Set(stages.map((stage) => stage.id));
+  if (stageIds.size !== stages.length) throw new Error("Stage IDs must be unique");
+  if (stageIds.has("complete")) throw new Error('Stage ID "complete" is reserved');
+  for (const stage of stages) {
+    for (const transition of stage.transitions ?? []) {
+      if (transition.next !== "complete" && !stageIds.has(transition.next)) {
+        throw new Error(`Unknown transition target: ${transition.next}`);
+      }
+    }
+  }
+  for (const wave of config.waveSource.staticWaves ?? []) validateWave(wave);
 
   return { config, path: workflowPath };
 }

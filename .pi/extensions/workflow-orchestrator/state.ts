@@ -42,7 +42,7 @@ export interface WorkflowState {
 export const STATE_TYPE = "workflow-state";
 
 export function appendState(pi: ExtensionAPI, state: WorkflowState): void {
-  pi.appendEntry(STATE_TYPE, state);
+  pi.appendEntry(STATE_TYPE, structuredClone(state));
 }
 
 export function restoreState(ctx: ExtensionContext): WorkflowState | undefined {

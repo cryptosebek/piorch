@@ -72,13 +72,15 @@ export async function runTaskFlow<TTask extends { retries: number }, TOutput>(
     let output: TOutput | null = null;
     try {
       output = await input.runStage(stage, input.task);
+      if (input.isStopped?.(input.task)) return;
       input.applyOutput(input.task, stage.id, output);
       input.onStageEnd?.(stage, input.task, output);
     } catch (error: any) {
+      if (input.isStopped?.(input.task)) return;
       const message = error?.message || "Stage failed";
       input.onError?.(stage, input.task, error instanceof Error ? error : new Error(message));
 
-      if (stage.id === "verify") {
+      if (stage.transitions?.length) {
         input.applyVerifyFailure(input.task, stage.id, null, message, "error");
         if (!recordFailure()) {
           input.markFailed(input.task, stage.id);
@@ -99,7 +101,6 @@ export async function runTaskFlow<TTask extends { retries: number }, TOutput>(
     if (input.isStopped?.(input.task)) return;
 
     let nextStageId: string | undefined;
-    const firstStageId = input.startStageId ?? input.stages[0]?.id;
     let matchedTransition = false;
     if (stage.transitions && stage.transitions.length > 0) {
       const fieldTarget = (output as any)?.output ?? output;
@@ -111,9 +112,7 @@ export async function runTaskFlow<TTask extends { retries: number }, TOutput>(
           break;
         }
       }
-      // If no transition matched (e.g., status is "unknown" or missing), keep verifier
-      // running and let verify-failure retry handling decide whether to continue/fail.
-      if (!nextStageId && stage.id === "verify") {
+      if (!matchedTransition) {
         nextStageId = stage.id;
       }
     } else {
@@ -125,7 +124,10 @@ export async function runTaskFlow<TTask extends { retries: number }, TOutput>(
       return;
     }
 
-    if ((nextStageId === firstStageId || nextStageId === stage.id) && stage.id === "verify") {
+    const stageIndex = input.stages.indexOf(stage);
+    const nextStageIndex = input.stages.findIndex((item) => item.id === nextStageId);
+    if (nextStageIndex < 0) throw new Error(`Stage not found: ${nextStageId}`);
+    if (nextStageIndex <= stageIndex) {
       const reason =
         nextStageId === stage.id && !matchedTransition ? "malformed_output" : "verification_failed";
       input.applyVerifyFailure(input.task, stage.id, output, undefined, reason);
