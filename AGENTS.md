@@ -79,15 +79,16 @@ Session files are JSONL (one JSON event per line):
 - Widget shows only a limited number of tasks.
 - Use `/workflow expand` or `/workflow collapse` to change visibility.
 
-## Extension reload caveat
+## Extension reload
 
-If a workflow is running and you `/reload`, the running workflow keeps using the old runtime.
-To apply changes safely:
+Reloading stops and drains running agents before loading the new runtime. Saved tasks stay stopped until explicitly resumed.
+To apply changes while keeping the saved workflow:
 
 ```
 /workflow stop
 /reload
-/workflow start ...
+/workflow resume
+/workflow message <id> Continue with the updated configuration
 ```
 
 ## Allowed extensions for subagents
